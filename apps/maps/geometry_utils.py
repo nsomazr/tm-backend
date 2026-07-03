@@ -5,17 +5,25 @@ from __future__ import annotations
 import math
 from typing import Any
 
-# Max distance (km) from click to a point feature to count as a hit.
-POINT_HIT_KM = 6.0
+EARTH_RADIUS_KM = 6371.0
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    r = 6371.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
     a = math.sin(dlat / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlon / 2) ** 2
-    return 2 * r * math.asin(math.sqrt(min(1.0, a)))
+    return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(min(1.0, a)))
+
+
+def point_hit_km(zoom: int) -> float:
+    """Max distance (km) from click to a point feature — scales with map zoom."""
+    return min(1.5, max(0.08, (360 / (2 ** (zoom + 3))) * 111 * 0.45))
+
+
+def line_hit_km(zoom: int) -> float:
+    """Max distance (km) from click to a line feature — scales with map zoom."""
+    return min(3.0, max(0.12, (360 / (2 ** (zoom + 2.5))) * 111 * 0.45))
 
 
 def _point_in_ring(lng: float, lat: float, ring: list[list[float]]) -> bool:
@@ -36,7 +44,92 @@ def _point_in_ring(lng: float, lat: float, ring: list[list[float]]) -> bool:
     return inside
 
 
-def point_in_geometry(lng: float, lat: float, geometry: dict[str, Any] | None) -> bool:
+def _distance_point_to_segment_km(
+    plat: float,
+    plng: float,
+    alat: float,
+    alng: float,
+    blat: float,
+    blng: float,
+) -> float:
+    """Approximate shortest distance from a point to a geographic line segment."""
+    lat_scale = max(math.cos(math.radians(plat)), 1e-6)
+    ax = (alng - plng) * lat_scale
+    ay = alat - plat
+    bx = (blng - plng) * lat_scale
+    by = blat - plat
+    dx = bx - ax
+    dy = by - ay
+    if dx == 0 and dy == 0:
+        return haversine_km(plat, plng, alat, alng)
+
+    t = max(0.0, min(1.0, -(ax * dx + ay * dy) / (dx * dx + dy * dy + 1e-15)))
+    closest_lat = plat + (ay + t * dy)
+    closest_lng = plng + (ax + t * dx) / lat_scale
+    return haversine_km(plat, plng, closest_lat, closest_lng)
+
+
+def _distance_to_linestring_km(lat: float, lng: float, coords: list[list[float]]) -> float:
+    if len(coords) < 2:
+        if coords:
+            return haversine_km(lat, lng, coords[0][1], coords[0][0])
+        return float("inf")
+    return min(
+        _distance_point_to_segment_km(
+            lat, lng, coords[i][1], coords[i][0], coords[i + 1][1], coords[i + 1][0]
+        )
+        for i in range(len(coords) - 1)
+    )
+
+
+def geometry_bbox(geometry: dict[str, Any] | None) -> tuple[float, float, float, float] | None:
+    """Return (min_lat, max_lat, min_lng, max_lng) for any GeoJSON geometry."""
+    if not geometry or "coordinates" not in geometry:
+        return None
+
+    lngs: list[float] = []
+    lats: list[float] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, list):
+            if (
+                len(node) >= 2
+                and isinstance(node[0], (int, float))
+                and isinstance(node[1], (int, float))
+            ):
+                lngs.append(float(node[0]))
+                lats.append(float(node[1]))
+            else:
+                for item in node:
+                    walk(item)
+
+    walk(geometry["coordinates"])
+    if not lngs:
+        return None
+    return min(lats), max(lats), min(lngs), max(lngs)
+
+
+def bbox_intersects_click(
+    bbox: tuple[float, float, float, float],
+    lat: float,
+    lng: float,
+    pad_deg: float,
+) -> bool:
+    min_lat, max_lat, min_lng, max_lng = bbox
+    return (
+        min_lat - pad_deg <= lat <= max_lat + pad_deg
+        and min_lng - pad_deg <= lng <= max_lng + pad_deg
+    )
+
+
+def point_in_geometry(
+    lng: float,
+    lat: float,
+    geometry: dict[str, Any] | None,
+    *,
+    zoom: int = 10,
+    layer_type: str | None = None,
+) -> bool:
     if not geometry or "type" not in geometry:
         return False
 
@@ -47,11 +140,20 @@ def point_in_geometry(lng: float, lat: float, geometry: dict[str, Any] | None) -
 
     if gtype == "Point":
         plng, plat = coords[0], coords[1]
-        return haversine_km(lat, lng, plat, plng) <= POINT_HIT_KM
+        return haversine_km(lat, lng, plat, plng) <= point_hit_km(zoom)
 
     if gtype == "MultiPoint":
         return any(
-            haversine_km(lat, lng, c[1], c[0]) <= POINT_HIT_KM for c in coords
+            haversine_km(lat, lng, c[1], c[0]) <= point_hit_km(zoom) for c in coords
+        )
+
+    if gtype == "LineString":
+        return _distance_to_linestring_km(lat, lng, coords) <= line_hit_km(zoom)
+
+    if gtype == "MultiLineString":
+        return any(
+            _distance_to_linestring_km(lat, lng, line) <= line_hit_km(zoom)
+            for line in coords
         )
 
     if gtype == "Polygon":
@@ -60,7 +162,6 @@ def point_in_geometry(lng: float, lat: float, geometry: dict[str, Any] | None) -
     if gtype == "MultiPolygon":
         return any(_point_in_ring(lng, lat, poly[0]) for poly in coords)
 
-    # Lines are not treated as mapped area coverage for click insights.
     return False
 
 
@@ -69,9 +170,12 @@ def feature_contains_click(
     lng: float,
     geometry: dict[str, Any] | None,
     layer_type: str,
+    zoom: int = 10,
 ) -> bool:
-    if layer_type == "line":
-        return False
-    if geometry and point_in_geometry(lng, lat, geometry):
-        return True
-    return False
+    return point_in_geometry(
+        lng,
+        lat,
+        geometry,
+        zoom=zoom,
+        layer_type=layer_type,
+    )

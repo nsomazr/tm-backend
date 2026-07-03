@@ -2,9 +2,10 @@ from datetime import timedelta
 
 from celery import shared_task
 from django.conf import settings
-from django.core.mail import send_mail
+from django.core.mail import EmailMultiAlternatives
 from django.utils import timezone
 
+from apps.accounts.email_templates import subscription_reminder_html, subscription_reminder_text
 from apps.accounts.models import User
 
 from .models import UserSubscription
@@ -41,19 +42,25 @@ def send_renewal_reminders():
 
 
 def _send_reminder_email(subscription, days_left):
+    user = subscription.user
+    if not user.email:
+        return
+
+    name = user.first_name or user.username
+    renew_url = f"{settings.FRONTEND_URL.rstrip('/')}/subscriptions"
     subject = f"Terra Meta: Subscription renews in {days_left} day(s)"
-    message = (
-        f"Hello {subscription.user.first_name or subscription.user.username},\n\n"
-        f"Your {subscription.plan.name} subscription expires on {subscription.end_date}. "
-        f"Renew now to keep full access to mineral maps.\n\n"
-        f"Visit {settings.FRONTEND_URL}/subscriptions to renew.\n\n"
-        f"Terra Meta Team"
+    text_body = subscription_reminder_text(
+        name, subscription.plan.name, subscription.end_date, days_left, renew_url
     )
-    if subscription.user.email:
-        send_mail(
-            subject,
-            message,
-            settings.DEFAULT_FROM_EMAIL,
-            [subscription.user.email],
-            fail_silently=True,
-        )
+    html_body = subscription_reminder_html(
+        name, subscription.plan.name, subscription.end_date, days_left, renew_url
+    )
+
+    message = EmailMultiAlternatives(
+        subject,
+        text_body,
+        settings.DEFAULT_FROM_EMAIL,
+        [user.email],
+    )
+    message.attach_alternative(html_body, "text/html")
+    message.send(fail_silently=True)

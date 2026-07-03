@@ -31,7 +31,7 @@ class PaymentOrder(models.Model):
     payment_provider = models.CharField(
         max_length=20,
         choices=[
-            ("selcom", "Selcom"),
+            ("snippe", "Snippe"),
             ("simulated", "Simulated"),
         ],
         default="simulated",

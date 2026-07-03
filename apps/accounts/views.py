@@ -1,6 +1,7 @@
 from rest_framework import generics, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
@@ -8,6 +9,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import EmailOTP, User
 from .otp_service import get_or_create_password_user, send_email_otp, verify_email_otp
 from .permissions import IsAdminUser, IsSuperAdmin
+from .throttling import AuthAnonThrottle, OTPSendThrottle, OTPVerifyThrottle
 from .serializers import (
     AdminUserCreateSerializer,
     AdminUserSerializer,
@@ -34,11 +36,13 @@ class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
+    throttle_classes = [AuthAnonThrottle]
 
 
 class LoginView(TokenObtainPairView):
     permission_classes = [AllowAny]
     serializer_class = EmailTokenObtainPairSerializer
+    throttle_classes = [AuthAnonThrottle]
 
     def post(self, request, *args, **kwargs):
         response = super().post(request, *args, **kwargs)
@@ -56,6 +60,7 @@ class LoginView(TokenObtainPairView):
 
 class SendOTPView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [OTPSendThrottle, AnonRateThrottle]
 
     def post(self, request):
         serializer = SendOTPSerializer(data=request.data)
@@ -76,6 +81,7 @@ class SendOTPView(APIView):
 
 class VerifyOTPView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [OTPVerifyThrottle, AnonRateThrottle]
 
     def post(self, request):
         serializer = VerifyOTPSerializer(data=request.data)
@@ -96,6 +102,7 @@ class VerifyOTPView(APIView):
 
 class PasswordSignupView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [AuthAnonThrottle]
 
     def post(self, request):
         serializer = PasswordSignupSerializer(data=request.data)

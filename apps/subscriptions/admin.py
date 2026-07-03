@@ -5,7 +5,15 @@ from .models import DownloadPurchase, SubscriptionPlan, UserSubscription
 
 @admin.register(SubscriptionPlan)
 class SubscriptionPlanAdmin(admin.ModelAdmin):
-    list_display = ("name", "billing_cycle", "price", "currency", "is_active")
+    list_display = (
+        "name",
+        "billing_cycle",
+        "price",
+        "currency",
+        "included_assistant_credits",
+        "included_report_downloads",
+        "is_active",
+    )
     filter_horizontal = ("included_minerals",)
 
 

@@ -14,7 +14,16 @@ from apps.accounts.models import User
 from apps.subscriptions.models import DownloadPurchase, UserSubscription
 
 from .models import Invoice, PaymentOrder
-from .selcom import SelcomClient, extract_checkout_redirect, parse_selcom_paid, selcom_is_configured
+from .snippe import (
+    SnippeClient,
+    SnippeError,
+    extract_payment_data,
+    extract_payment_url,
+    parse_snippe_paid,
+    snippe_idempotency_key,
+    snippe_is_configured,
+    snippe_webhook_url,
+)
 
 
 @shared_task
@@ -102,6 +111,16 @@ def activate_order(order, transaction_data=None):
     generate_invoice.delay(order.id)
 
 
+def fail_order(order, transaction_data=None):
+    if order.status == PaymentOrder.Status.COMPLETED:
+        return order
+    order.status = PaymentOrder.Status.FAILED
+    if transaction_data:
+        order.gateway_response = {**order.gateway_response, "failure": transaction_data}
+    order.save(update_fields=["status", "gateway_response", "updated_at"])
+    return order
+
+
 def normalize_msisdn(phone: str) -> str:
     digits = re.sub(r"\D", "", phone or "")
     if digits.startswith("0"):
@@ -111,79 +130,116 @@ def normalize_msisdn(phone: str) -> str:
     return digits
 
 
+def _customer_fields(user: User, *, name: str | None = None, email: str | None = None) -> dict[str, str]:
+    full_name = (name or user.get_full_name() or user.username).strip()
+    name_parts = full_name.split(None, 1)
+    first_name = name_parts[0] if name_parts else user.username
+    last_name = name_parts[1] if len(name_parts) > 1 else "Customer"
+    return {
+        "firstname": first_name,
+        "lastname": last_name,
+        "email": (email or user.email or f"{user.username}@terra-meta.local").strip(),
+    }
+
+
+def _snippe_amount(order: PaymentOrder) -> int:
+    return int(order.amount)
+
+
 def refresh_order_status(order: PaymentOrder) -> PaymentOrder:
     """Poll the payment gateway and activate the order when paid."""
     if order.status != PaymentOrder.Status.PENDING:
         return order
 
-    if order.payment_provider == "selcom" and selcom_is_configured():
-        tracking_id = order.order_tracking_id or order.merchant_reference
-        client = SelcomClient()
-        response = client.order_status(tracking_id)
+    if order.payment_provider == "snippe" and snippe_is_configured() and order.order_tracking_id:
+        client = SnippeClient()
+        try:
+            response = client.get_payment(order.order_tracking_id)
+        except SnippeError as exc:
+            order.gateway_response = {**order.gateway_response, "order_status_error": str(exc)}
+            order.save(update_fields=["gateway_response", "updated_at"])
+            return order
         order.gateway_response = {**order.gateway_response, "order_status": response}
-        if parse_selcom_paid(response):
-            activate_order(order, response)
+        if parse_snippe_paid(response):
+            activate_order(order, extract_payment_data(response))
         else:
             order.save(update_fields=["gateway_response", "updated_at"])
+        return order
+
     return order
 
 
-def start_selcom_checkout(order: PaymentOrder, user: User, msisdn: str) -> PaymentOrder:
-    client = SelcomClient()
-    order_id = order.merchant_reference
+def start_snippe_mobile_checkout(order: PaymentOrder, user: User, msisdn: str) -> PaymentOrder:
+    client = SnippeClient()
     msisdn = normalize_msisdn(msisdn)
-    create_payload = {
-        "amount": str(int(order.amount)),
-        "currency": order.currency,
-        "order_id": order_id,
-        "buyer_name": user.get_full_name() or user.username,
-        "buyer_email": user.email or "",
-        "buyer_phone": msisdn,
-        "no_of_items": 1,
+    customer = _customer_fields(user)
+    payload = {
+        "payment_type": "mobile",
+        "details": {
+            "amount": _snippe_amount(order),
+            "currency": order.currency,
+        },
+        "phone_number": msisdn,
+        "customer": customer,
+        "webhook_url": snippe_webhook_url(),
+        "metadata": {"order_id": order.merchant_reference},
     }
-    create_response = client.create_order_minimal(create_payload)
-    order.payment_provider = "selcom"
-    order.order_tracking_id = order_id
+    create_response = client.create_payment(
+        payload,
+        idempotency_key=snippe_idempotency_key(order.merchant_reference),
+    )
+    payment_data = extract_payment_data(create_response)
+    order.payment_provider = "snippe"
+    order.order_tracking_id = payment_data.get("reference", "")
     order.msisdn = msisdn
-    order.gateway_response = {"create_order": create_response}
+    order.gateway_response = {"create_payment": create_response}
     order.save()
-
-    wallet_response = client.wallet_payment({"order_id": order_id, "msisdn": msisdn})
-    order.gateway_response = {**order.gateway_response, "wallet_payment": wallet_response}
-    order.save(update_fields=["gateway_response", "updated_at"])
     return order
 
 
-def start_selcom_card_checkout(order: PaymentOrder, user: User) -> tuple[PaymentOrder, str]:
-    client = SelcomClient()
-    order_id = order.merchant_reference
-    redirect_url = f"{settings.SELCOM_REDIRECT_URL.rstrip('/')}?ref={order_id}"
-    create_payload = {
-        "amount": str(int(order.amount)),
-        "currency": order.currency,
-        "order_id": order_id,
-        "buyer_name": user.get_full_name() or user.username,
-        "buyer_email": user.email or "",
-        "buyer_phone": user.phone or "",
-        "no_of_items": 1,
-        "payment_methods": "ALL",
-        "redirect_url": redirect_url,
-        "cancel_url": settings.SELCOM_CANCEL_URL,
-        "billing": {
-            "firstname": user.first_name or user.username,
-            "lastname": user.last_name or "",
-            "country": "TZ",
-            "email": user.email or "",
-            "phone": user.phone or "",
+def start_snippe_card_checkout(
+    order: PaymentOrder,
+    user: User,
+    *,
+    cardholder_name: str | None = None,
+    billing_email: str | None = None,
+    msisdn: str | None = None,
+) -> tuple[PaymentOrder, str]:
+    client = SnippeClient()
+    customer = _customer_fields(user, name=cardholder_name, email=billing_email)
+    redirect_url = f"{settings.SNIPPE_REDIRECT_URL.rstrip('/')}?ref={order.merchant_reference}"
+    phone_number = normalize_msisdn(msisdn or user.phone or "255700000000")
+    payload = {
+        "payment_type": "card",
+        "details": {
+            "amount": _snippe_amount(order),
+            "currency": order.currency,
+            "redirect_url": redirect_url,
+            "cancel_url": settings.SNIPPE_CANCEL_URL,
         },
+        "phone_number": phone_number,
+        "customer": {
+            **customer,
+            "address": "Dar es Salaam",
+            "city": "Dar es Salaam",
+            "state": "DSM",
+            "postcode": "14101",
+            "country": "TZ",
+        },
+        "webhook_url": snippe_webhook_url(),
+        "metadata": {"order_id": order.merchant_reference},
     }
-    create_response = client.create_order(create_payload)
-    gateway_url = extract_checkout_redirect(create_response)
+    create_response = client.create_payment(
+        payload,
+        idempotency_key=snippe_idempotency_key(order.merchant_reference),
+    )
+    gateway_url = extract_payment_url(create_response)
     if not gateway_url:
-        raise ValueError("Selcom did not return a payment page URL.")
+        raise SnippeError("Snippe did not return a payment page URL.")
 
-    order.payment_provider = "selcom"
-    order.order_tracking_id = order_id
-    order.gateway_response = {"create_order": create_response}
+    payment_data = extract_payment_data(create_response)
+    order.payment_provider = "snippe"
+    order.order_tracking_id = payment_data.get("reference", "")
+    order.gateway_response = {"create_payment": create_response}
     order.save(update_fields=["payment_provider", "order_tracking_id", "gateway_response", "updated_at"])
     return order, gateway_url

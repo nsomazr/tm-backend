@@ -39,7 +39,33 @@ def generate_report_summary(report_id):
         },
     )
 
+    report.refresh_from_db()
+    if not report.pdf_file:
+        from .pdf_service import ensure_report_pdf
 
-def _extract_findings(summary_text):
-    lines = [line.strip("- •") for line in summary_text.split("\n") if line.strip()]
-    return lines[:5]
+        ensure_report_pdf(report)
+
+
+def _extract_findings(summary_text: str) -> list[str]:
+    for marker in ("Key findings:", "key findings:", "KEY FINDINGS:"):
+        if marker in summary_text:
+            _, tail = summary_text.split(marker, 1)
+            findings = []
+            for line in tail.split("\n"):
+                stripped = line.strip()
+                if not stripped:
+                    if findings:
+                        break
+                    continue
+                if stripped.startswith(("-", "•")):
+                    findings.append(stripped.lstrip("- •").strip())
+                elif findings:
+                    break
+            return [f for f in findings if f][:8]
+
+    lines = [
+        line.strip("- •")
+        for line in summary_text.split("\n")
+        if line.strip().startswith(("-", "•"))
+    ]
+    return [line for line in lines if line][:8]

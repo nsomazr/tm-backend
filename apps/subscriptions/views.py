@@ -5,16 +5,17 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.permissions import IsAdminUser
+from apps.accounts.throttling import PublicCatalogThrottleMixin
 
-from .models import DownloadPurchase, SubscriptionPlan, UserSubscription
+from .models import DownloadPurchase, SubscriptionPlan, SubscriptionReportDownload, UserSubscription
 from .serializers import (
-    DownloadPurchaseSerializer,
+    MyReportSerializer,
     SubscriptionPlanSerializer,
     UserSubscriptionSerializer,
 )
 
 
-class SubscriptionPlanListView(generics.ListAPIView):
+class SubscriptionPlanListView(PublicCatalogThrottleMixin, generics.ListAPIView):
     queryset = SubscriptionPlan.objects.filter(is_active=True).prefetch_related("included_minerals")
     serializer_class = SubscriptionPlanSerializer
     permission_classes = [AllowAny]
@@ -52,12 +53,58 @@ class MySubscriptionView(generics.RetrieveAPIView):
         return Response(serializer.data)
 
 
-class MyPurchasesView(generics.ListAPIView):
-    serializer_class = DownloadPurchaseSerializer
+class MyPurchasesView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
-        return DownloadPurchase.objects.filter(user=self.request.user).select_related("report")
+    def get(self, request):
+        user = request.user
+        rows: list[dict] = []
+        seen: set[int] = set()
+
+        purchases = (
+            DownloadPurchase.objects.filter(user=user)
+            .select_related("report")
+            .order_by("-purchased_at")
+        )
+        for purchase in purchases:
+            seen.add(purchase.report_id)
+            rows.append(
+                {
+                    "id": purchase.id,
+                    "report": purchase.report_id,
+                    "report_slug": purchase.report.slug,
+                    "report_title": purchase.report.title,
+                    "source": "purchase",
+                    "purchased_at": purchase.purchased_at,
+                    "amount_paid": purchase.amount_paid,
+                    "currency": purchase.currency,
+                }
+            )
+
+        downloads = (
+            SubscriptionReportDownload.objects.filter(user=user)
+            .select_related("report")
+            .order_by("-downloaded_at")
+        )
+        for download in downloads:
+            if download.report_id in seen:
+                continue
+            rows.append(
+                {
+                    "id": download.id,
+                    "report": download.report_id,
+                    "report_slug": download.report.slug,
+                    "report_title": download.report.title,
+                    "source": "subscription",
+                    "purchased_at": download.downloaded_at,
+                    "amount_paid": None,
+                    "currency": None,
+                }
+            )
+
+        rows.sort(key=lambda row: row["purchased_at"], reverse=True)
+        serializer = MyReportSerializer(rows, many=True)
+        return Response(serializer.data)
 
 
 class AdminSubscriptionListView(generics.ListAPIView):

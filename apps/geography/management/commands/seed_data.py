@@ -6,6 +6,7 @@ from django.utils import timezone
 from apps.accounts.models import User
 from apps.compliance.models import TermsVersion
 from apps.geography.models import Country, Region
+from apps.geography.region_geo import region_bounds
 from apps.minerals.models import Mineral, MineralCategory, MineralManagerAssignment
 from apps.maps.models import MapLayer
 from apps.subscriptions.models import SubscriptionPlan, UserSubscription
@@ -37,7 +38,15 @@ class Command(BaseCommand):
         )
 
         for name in TANZANIA_REGIONS:
-            Region.objects.get_or_create(country=country, name=name, defaults={"name_sw": name})
+            bounds = region_bounds(name)
+            region, created = Region.objects.get_or_create(
+                country=country,
+                name=name,
+                defaults={"name_sw": name, "bounds": bounds},
+            )
+            if not created and not region.bounds:
+                region.bounds = bounds
+                region.save(update_fields=["bounds"])
 
         categories = [
             ("Gold Priority 1", "Dhahabu - Kipaumbele -1", "gold-priority-1", "#E87722", 1),
@@ -118,14 +127,24 @@ class Command(BaseCommand):
 
         mwanza = Region.objects.filter(name="Mwanza").first()
         arusha = Region.objects.filter(name="Arusha").first()
-        region_by_mineral = {
-            gold: mwanza,
-            graphite: mwanza,
-            mineral_objs["tanzanite"]: arusha,
-            mineral_objs["copper"]: mwanza,
-            mineral_objs["nickel"]: Region.objects.filter(name="Morogoro").first() or mwanza,
-            mineral_objs["iron-ore"]: Region.objects.filter(name="Lindi").first() or mwanza,
-            mineral_objs["lithium"]: Region.objects.filter(name="Mbeya").first() or mwanza,
+
+        def region_named(name: str):
+            return Region.objects.filter(name=name).first() or mwanza
+
+        region_by_slug = {
+            "gold-priority-1": region_named("Geita"),
+            "gold-priority-2": region_named("Shinyanga"),
+            "gold-priority-3": region_named("Mara"),
+            "host-graphite-gold": mwanza,
+            "host-graphite": mwanza,
+            "graphite-zones": region_named("Lindi"),
+            "main-structures": region_named("Geita"),
+            "linear-structures": region_named("Geita"),
+            "tanzanite-zones": region_named("Manyara"),
+            "copper-zones": region_named("Kigoma"),
+            "nickel-zones": region_named("Morogoro"),
+            "iron-zones": region_named("Dodoma"),
+            "lithium-zones": region_named("Mbeya"),
         }
         for slug, name, name_sw, mineral, ltype, color, is_preview, z_index in layer_defs:
             layer, created = MapLayer.objects.get_or_create(
@@ -135,7 +154,7 @@ class Command(BaseCommand):
                     "name": name,
                     "name_sw": name_sw,
                     "layer_type": ltype,
-                    "region": region_by_mineral.get(mineral, mwanza),
+                    "region": region_by_slug.get(slug, mwanza),
                     "z_index": z_index,
                     "is_preview": is_preview,
                     "style": {
@@ -153,7 +172,7 @@ class Command(BaseCommand):
                 layer.name = name
                 layer.name_sw = name_sw
                 layer.layer_type = ltype
-                layer.region = region_by_mineral.get(mineral, mwanza)
+                layer.region = region_by_slug.get(slug, mwanza)
                 layer.z_index = z_index
                 layer.is_preview = is_preview
                 layer.style = {
@@ -182,11 +201,22 @@ class Command(BaseCommand):
             slug="monthly-standard",
             defaults={
                 "name": "Monthly Standard",
-                "description": "Full access to all mineral maps and analytics",
+                "description": "Full map access, report exploration, and 3 PDF downloads per month",
                 "billing_cycle": "monthly",
                 "price": 50000,
                 "currency": "TZS",
+                "included_report_downloads": 3,
             },
+        )
+        monthly.included_report_downloads = 3
+        monthly.included_assistant_credits = 3000
+        monthly.includes_chat_history = True
+        monthly.save(
+            update_fields=[
+                "included_report_downloads",
+                "included_assistant_credits",
+                "includes_chat_history",
+            ]
         )
         monthly.included_minerals.set(list(mineral_objs.values()))
 
@@ -194,13 +224,23 @@ class Command(BaseCommand):
             slug="annual-standard",
             defaults={
                 "name": "Annual Standard",
-                "description": "Full year access with 20% savings",
+                "description": "Full year access with 10 included report PDF downloads",
                 "billing_cycle": "annual",
                 "price": 480000,
                 "currency": "TZS",
+                "included_report_downloads": 10,
             },
         )
-        annual.included_minerals.set(list(mineral_objs.values()))
+        annual.included_report_downloads = 10
+        annual.included_assistant_credits = 5000
+        annual.includes_chat_history = True
+        annual.save(
+            update_fields=[
+                "included_report_downloads",
+                "included_assistant_credits",
+                "includes_chat_history",
+            ]
+        )
 
         TermsVersion.objects.get_or_create(
             version="1.0",

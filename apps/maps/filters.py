@@ -8,4 +8,4 @@ class MapLayerFilter(django_filters.FilterSet):
 
     class Meta:
         model = MapLayer
-        fields = ["mineral", "region", "layer_type", "is_preview", "mineral_slug"]
+        fields = ["mineral", "region", "layer_type", "is_preview", "is_active", "mineral_slug"]

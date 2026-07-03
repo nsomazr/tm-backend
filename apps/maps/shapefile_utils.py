@@ -34,7 +34,14 @@ def parse_upload_content(content: bytes, filename: str, file_type: str | None = 
 
 
 def _parse_zip(content: bytes) -> list[dict[str, Any]]:
+    max_entries = 200
+    max_uncompressed = 100 * 1024 * 1024
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
+        if len(zf.infolist()) > max_entries:
+            raise ValueError("ZIP contains too many files.")
+        total_size = sum(info.file_size for info in zf.infolist())
+        if total_size > max_uncompressed:
+            raise ValueError("ZIP uncompressed size exceeds limit.")
         names = zf.namelist()
         shp_names = [n for n in names if n.lower().endswith(".shp")]
         if shp_names:

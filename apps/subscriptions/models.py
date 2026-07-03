@@ -19,6 +19,18 @@ class SubscriptionPlan(models.Model):
         blank=True,
         related_name="subscription_plans",
     )
+    included_report_downloads = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="PDF downloads included per billing period (e.g. 3 monthly, 10 annual).",
+    )
+    included_assistant_credits = models.PositiveIntegerField(
+        default=0,
+        help_text="Ask Terra AI credits included per calendar month (e.g. 3000 monthly plan, 5000 annual plan).",
+    )
+    includes_chat_history = models.BooleanField(
+        default=False,
+        help_text="Subscribers can persist Ask Terra chat threads across sessions.",
+    )
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -105,3 +117,30 @@ class DownloadPurchase(models.Model):
 
     def __str__(self):
         return f"{self.user.username} purchased {self.report.title}"
+
+
+class SubscriptionReportDownload(models.Model):
+    """Tracks report PDF downloads consumed from a subscriber's included quota."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="subscription_report_downloads",
+    )
+    report = models.ForeignKey(
+        "reports.Report",
+        on_delete=models.CASCADE,
+        related_name="subscription_downloads",
+    )
+    subscription = models.ForeignKey(
+        UserSubscription,
+        on_delete=models.CASCADE,
+        related_name="report_downloads",
+    )
+    downloaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("user", "report", "subscription")
+
+    def __str__(self):
+        return f"{self.user.username} downloaded {self.report.title} (quota)"

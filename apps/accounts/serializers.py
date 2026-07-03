@@ -1,12 +1,15 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
+from apps.analytics.credits import get_assistant_credit_quota
+
 from .models import User
 from .staff_sync import is_privileged_role, sync_user_staff_flags
 
 
 class UserSerializer(serializers.ModelSerializer):
     has_paid_access = serializers.BooleanField(read_only=True)
+    assistant_credits = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -21,9 +24,16 @@ class UserSerializer(serializers.ModelSerializer):
             "organization",
             "profile_complete",
             "has_paid_access",
+            "assistant_credits",
             "created_at",
         )
         read_only_fields = ("id", "role", "created_at")
+
+    def get_assistant_credits(self, obj):
+        request = self.context.get("request")
+        if not request:
+            return None
+        return get_assistant_credit_quota(request, obj)
 
 
 class ProfileCompleteSerializer(serializers.ModelSerializer):

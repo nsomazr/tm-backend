@@ -2,10 +2,12 @@ import uuid
 
 from django.conf import settings
 from django.db.models import Count, Sum
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, status
 from rest_framework.filters import OrderingFilter, SearchFilter
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -15,14 +17,27 @@ from apps.reports.models import Report
 from apps.subscriptions.models import SubscriptionPlan, UserSubscription
 
 from .models import Invoice, PaymentOrder
-from .selcom import selcom_is_configured
 from .serializers import (
     AdminPaymentOrderSerializer,
     CheckoutSerializer,
     InvoiceSerializer,
     PaymentOrderSerializer,
 )
-from .services import activate_order, refresh_order_status, start_selcom_card_checkout, start_selcom_checkout
+from .services import (
+    activate_order,
+    fail_order,
+    refresh_order_status,
+    start_snippe_card_checkout,
+    start_snippe_mobile_checkout,
+)
+from .snippe import (
+    SnippeWebhookError,
+    verify_snippe_webhook,
+    webhook_event_data,
+    webhook_event_type,
+    webhook_order_reference,
+    snippe_is_configured,
+)
 
 
 def _build_checkout_order(request, data):
@@ -80,10 +95,16 @@ class CheckoutView(APIView):
         order = _build_checkout_order(request, data)
         payment_method = data.get("payment_method", "mobile_money")
 
-        if selcom_is_configured():
+        if snippe_is_configured():
             if payment_method == "card":
                 try:
-                    order, gateway_url = start_selcom_card_checkout(order, user)
+                    order, gateway_url = start_snippe_card_checkout(
+                        order,
+                        user,
+                        cardholder_name=data.get("cardholder_name"),
+                        billing_email=data.get("billing_email"),
+                        msisdn=data.get("msisdn") or user.phone,
+                    )
                 except Exception as exc:
                     order.status = PaymentOrder.Status.FAILED
                     order.gateway_response = {"error": str(exc)}
@@ -92,7 +113,7 @@ class CheckoutView(APIView):
 
                 return Response({
                     "order": PaymentOrderSerializer(order).data,
-                    "payment_provider": "selcom",
+                    "payment_provider": "snippe",
                     "payment_method": "card",
                     "merchant_reference": order.merchant_reference,
                     "message": "Continue to the secure payment page to pay by card.",
@@ -102,11 +123,11 @@ class CheckoutView(APIView):
             msisdn = (data.get("msisdn") or user.phone or "").strip()
             if not msisdn:
                 return Response(
-                    {"detail": "Mobile number (msisdn) is required for Selcom payment."},
+                    {"detail": "Mobile number (msisdn) is required for mobile money payment."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             try:
-                start_selcom_checkout(order, user, msisdn)
+                start_snippe_mobile_checkout(order, user, msisdn)
             except Exception as exc:
                 order.status = PaymentOrder.Status.FAILED
                 order.gateway_response = {"error": str(exc)}
@@ -115,7 +136,7 @@ class CheckoutView(APIView):
 
             return Response({
                 "order": PaymentOrderSerializer(order).data,
-                "payment_provider": "selcom",
+                "payment_provider": "snippe",
                 "payment_method": "mobile_money",
                 "merchant_reference": order.merchant_reference,
                 "message": "Check your phone to approve the mobile money payment.",
@@ -129,7 +150,7 @@ class CheckoutView(APIView):
             return Response(
                 {
                     "detail": (
-                        "Payment gateway is not configured. Add Selcom credentials to .env, "
+                        "Payment gateway is not configured. Add Snippe credentials to .env, "
                         "or set PAYMENTS_SIMULATE=true for local testing only."
                     ),
                     "code": "payment_not_configured",
@@ -144,6 +165,47 @@ class CheckoutView(APIView):
             "payment_provider": "simulated",
             "redirect_url": f"{settings.FRONTEND_URL}/dashboard",
         })
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class SnippeWebhookView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        raw_body = request.body.decode("utf-8")
+        try:
+            event = verify_snippe_webhook(raw_body, dict(request.headers))
+        except SnippeWebhookError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        event_type = webhook_event_type(event)
+        data = webhook_event_data(event)
+        merchant_reference = webhook_order_reference(data)
+        snippe_reference = str(data.get("reference") or "")
+
+        order = None
+        if merchant_reference:
+            order = PaymentOrder.objects.filter(merchant_reference=merchant_reference).first()
+        if order is None and snippe_reference:
+            order = PaymentOrder.objects.filter(order_tracking_id=snippe_reference).first()
+
+        if order is None:
+            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        order.gateway_response = {**order.gateway_response, "webhook": event}
+
+        if event_type == "payment.completed":
+            if order.status != PaymentOrder.Status.COMPLETED:
+                activate_order(order, data)
+            else:
+                order.save(update_fields=["gateway_response", "updated_at"])
+        elif event_type in {"payment.failed", "payment.expired", "payment.voided"}:
+            fail_order(order, data)
+        else:
+            order.save(update_fields=["gateway_response", "updated_at"])
+
+        return Response({"detail": "OK"})
 
 
 class PaymentOrderStatusView(APIView):

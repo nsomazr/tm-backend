@@ -72,6 +72,12 @@ class CheckoutSerializer(serializers.Serializer):
         required=False,
         default="mobile_money",
     )
+    card_brand = serializers.ChoiceField(
+        choices=[("visa", "Visa"), ("mastercard", "Mastercard")],
+        required=False,
+    )
+    cardholder_name = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    billing_email = serializers.EmailField(required=False, allow_blank=True)
 
     def validate(self, attrs):
         order_type = attrs["order_type"]

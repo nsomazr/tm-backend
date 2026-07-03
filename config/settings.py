@@ -2,6 +2,7 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -11,6 +12,15 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-dev-key-change-in-production")
 DEBUG = os.getenv("DEBUG", "True").lower() in ("true", "1", "yes")
 ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
+
+_INSECURE_SECRET_KEYS = {
+    "",
+    "django-insecure-dev-key-change-in-production",
+    "change-me-in-production",
+}
+if not DEBUG:
+    if SECRET_KEY in _INSECURE_SECRET_KEYS or len(SECRET_KEY) < 32:
+        raise ImproperlyConfigured("Set a strong SECRET_KEY (32+ chars) when DEBUG=False.")
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -112,6 +122,17 @@ REST_FRAMEWORK = {
     ),
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 25,
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "600/hour",
+        "user": "2000/hour",
+        "auth": "30/hour",
+        "otp_send": "8/hour",
+        "otp_verify": "40/hour",
+    },
 }
 
 SIMPLE_JWT = {
@@ -137,20 +158,56 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
 
-SELCOM_BASE_URL = os.getenv("SELCOM_BASE_URL", "https://apigw.selcommobile.com/v1")
-SELCOM_VENDOR = os.getenv("SELCOM_VENDOR", "")
-SELCOM_API_KEY = os.getenv("SELCOM_API_KEY", "")
-SELCOM_API_SECRET = os.getenv("SELCOM_API_SECRET", "")
-SELCOM_REDIRECT_URL = os.getenv("SELCOM_REDIRECT_URL", "")
-SELCOM_CANCEL_URL = os.getenv("SELCOM_CANCEL_URL", "")
+if os.getenv("REDIS_URL"):
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": os.getenv("REDIS_URL"),
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "terra-meta",
+        }
+    }
 
-if not SELCOM_REDIRECT_URL:
-    SELCOM_REDIRECT_URL = f"{FRONTEND_URL}/payment/callback"
-if not SELCOM_CANCEL_URL:
-    SELCOM_CANCEL_URL = f"{FRONTEND_URL}/subscriptions"
+# Snippe payments (https://docs.snippe.sh/docs/)
+SNIPPE_API_KEY = os.getenv("SNIPPE_API_KEY", "")
+SNIPPE_BASE_URL = os.getenv("SNIPPE_BASE_URL", "https://api.snippe.sh")
+SNIPPE_WEBHOOK_SECRET = os.getenv("SNIPPE_WEBHOOK_SECRET", "")
+SNIPPE_REDIRECT_URL = os.getenv("SNIPPE_REDIRECT_URL", "")
+SNIPPE_CANCEL_URL = os.getenv("SNIPPE_CANCEL_URL", "")
 
-# Local dev only: auto-complete checkout when Selcom is not configured.
+BACKEND_URL = os.getenv("BACKEND_URL", "").strip()
+if not BACKEND_URL:
+    for origin in os.getenv(
+        "CSRF_TRUSTED_ORIGINS",
+        "https://terrameta.5ggeology.com,https://api.terrameta.5ggeology.com",
+    ).split(","):
+        origin = origin.strip()
+        if "api." in origin:
+            BACKEND_URL = origin.rstrip("/")
+            break
+if not BACKEND_URL:
+    BACKEND_URL = "http://127.0.0.1:8085"
+
+if not SNIPPE_REDIRECT_URL:
+    SNIPPE_REDIRECT_URL = f"{FRONTEND_URL}/payment/callback"
+if not SNIPPE_CANCEL_URL:
+    SNIPPE_CANCEL_URL = f"{FRONTEND_URL}/subscriptions"
+
+# Local dev only: auto-complete checkout when Snippe is not configured.
 PAYMENTS_SIMULATE = os.getenv("PAYMENTS_SIMULATE", "false").lower() in ("1", "true", "yes")
+if not DEBUG and PAYMENTS_SIMULATE:
+    raise ImproperlyConfigured("PAYMENTS_SIMULATE must not be enabled when DEBUG=False.")
+
+# Max shapefile / GeoJSON upload size (bytes)
+MAP_UPLOAD_MAX_BYTES = int(os.getenv("MAP_UPLOAD_MAX_BYTES", str(50 * 1024 * 1024)))
+
+# Icon URL override for HTML emails (optional)
+EMAIL_LOGO_URL = os.getenv("EMAIL_LOGO_URL", "").strip()
 
 # AI summaries - provider: ollama | groq | gemini (with comma-separated fallbacks)
 AI_PROVIDER = os.getenv("AI_PROVIDER", "groq")
@@ -175,6 +232,12 @@ if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+    X_FRAME_OPTIONS = "DENY"
 
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.hostinger.com")
