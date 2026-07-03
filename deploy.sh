@@ -37,6 +37,12 @@ python manage.py collectstatic --noinput
 
 mkdir -p logs media staticfiles
 
+echo "==> Clearing stale Celery beat schedule and queued tasks..."
+rm -f celerybeat-schedule celerybeat-schedule.db celerybeat-schedule.dat
+if [[ -x .venv/bin/celery ]]; then
+  .venv/bin/celery -A config purge -f >/dev/null 2>&1 || true
+fi
+
 if ! command -v pm2 &>/dev/null; then
   echo "ERROR: pm2 is not installed. Run: npm install -g pm2"
   exit 1

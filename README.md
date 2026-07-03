@@ -49,6 +49,20 @@ pm2 logs terra-meta-api
 pm2 restart terra-meta-api
 ```
 
+### Celery: unknown task errors
+
+If the worker logs `KeyError: 'some.app.tasks.task_name'`, the Redis queue still has messages from an older deployment (removed or renamed tasks). On the server:
+
+```bash
+cd /home/tm-api/htdocs/www.api.terrameta.5ggeology.com/tm-backend
+source .venv/bin/activate
+rm -f celerybeat-schedule celerybeat-schedule.db celerybeat-schedule.dat
+celery -A config purge -f
+pm2 restart terra-meta-celery terra-meta-celery-beat
+```
+
+`deploy.sh` runs the purge step automatically on each deploy.
+
 ## Payments (Snippe)
 
 Live checkout uses [Snippe](https://docs.snippe.sh/docs/) for mobile money and card payments.
