@@ -9,6 +9,7 @@ from django.db.utils import OperationalError
 
 from .models import LayerUpload, LayerVersion, MapFeature, MapLayer
 from .shapefile_utils import detect_file_type, parse_upload_content
+from .upload_security import check_disk_headroom, friendly_upload_error
 
 DEFAULT_FEATURE_BULK_BATCH_SIZE = 25
 DEFAULT_MAX_BATCH_BYTES = 1_048_576  # 1 MiB
@@ -102,14 +103,15 @@ def process_layer_upload(upload_id):
         layer = upload.layer
         content = upload.file.read()
         filename = upload.file.name
+        check_disk_headroom(boundary=False)
 
         ft = upload.file_type
         if ft == "geojson" and detect_file_type(filename) == "shapefile":
             ft = "shapefile"
         if ft in ("geojson", "json", "shapefile", "zip", ""):
-            features_data = parse_upload_content(content, filename, ft or None)
+            features_data = parse_upload_content(content, filename, ft or None, boundary=False)
         else:
-            features_data = parse_upload_content(content, filename, ft)
+            features_data = parse_upload_content(content, filename, ft, boundary=False)
 
         with transaction.atomic():
             layer.features.filter(is_active=True).update(is_active=False)
@@ -130,18 +132,12 @@ def process_layer_upload(upload_id):
         upload.save(update_fields=["status"])
     except OperationalError as exc:
         upload.status = LayerUpload.Status.FAILED
-        if "max_allowed_packet" in str(exc).lower():
-            upload.error_message = (
-                "Import failed: feature batch is too large for the database. "
-                "Try simplifying geometries, splitting the layer, or increasing MySQL max_allowed_packet."
-            )
-        else:
-            upload.error_message = str(exc)
+        upload.error_message = friendly_upload_error(exc)
         upload.save(update_fields=["status", "error_message"])
         raise
     except Exception as exc:
         upload.status = LayerUpload.Status.FAILED
-        upload.error_message = str(exc)
+        upload.error_message = friendly_upload_error(exc)
         upload.save(update_fields=["status", "error_message"])
         raise
 

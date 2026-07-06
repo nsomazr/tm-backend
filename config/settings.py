@@ -150,6 +150,7 @@ REST_FRAMEWORK = {
         "auth": "30/hour",
         "otp_send": "8/hour",
         "otp_verify": "40/hour",
+        "upload": "30/hour",
     },
 }
 
@@ -251,6 +252,18 @@ if not DEBUG and PAYMENTS_SIMULATE:
 
 # Max shapefile / GeoJSON upload size (bytes)
 MAP_UPLOAD_MAX_BYTES = int(os.getenv("MAP_UPLOAD_MAX_BYTES", str(50 * 1024 * 1024)))
+BOUNDARY_UPLOAD_MAX_BYTES = int(
+    os.getenv("BOUNDARY_UPLOAD_MAX_BYTES", os.getenv("MAP_UPLOAD_MAX_BYTES", str(50 * 1024 * 1024)))
+)
+MAP_UPLOAD_MAX_FEATURES = int(os.getenv("MAP_UPLOAD_MAX_FEATURES", "50000"))
+BOUNDARY_UPLOAD_MAX_FEATURES = int(os.getenv("BOUNDARY_UPLOAD_MAX_FEATURES", "100000"))
+MAP_UPLOAD_MIN_FREE_BYTES = int(os.getenv("MAP_UPLOAD_MIN_FREE_BYTES", str(512 * 1024 * 1024)))
+BOUNDARY_IMPORT_MIN_FREE_BYTES = int(
+    os.getenv("BOUNDARY_IMPORT_MIN_FREE_BYTES", os.getenv("MAP_UPLOAD_MIN_FREE_BYTES", str(512 * 1024 * 1024)))
+)
+MAP_ZIP_MAX_ENTRIES = int(os.getenv("MAP_ZIP_MAX_ENTRIES", "200"))
+MAP_ZIP_MAX_UNCOMPRESSED_BYTES = int(os.getenv("MAP_ZIP_MAX_UNCOMPRESSED_BYTES", str(100 * 1024 * 1024)))
+MAP_ZIP_MAX_COMPRESSION_RATIO = int(os.getenv("MAP_ZIP_MAX_COMPRESSION_RATIO", "100"))
 MAP_FEATURE_BULK_BATCH_SIZE = int(os.getenv("MAP_FEATURE_BULK_BATCH_SIZE", "25"))
 MAP_FEATURE_MAX_BATCH_BYTES = int(os.getenv("MAP_FEATURE_MAX_BATCH_BYTES", str(1024 * 1024)))
 MAP_FEATURE_MAX_GEOMETRY_BYTES = int(os.getenv("MAP_FEATURE_MAX_GEOMETRY_BYTES", str(512 * 1024)))

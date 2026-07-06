@@ -12,6 +12,7 @@ from rest_framework.response import Response
 
 from apps.accounts.models import User
 from apps.accounts.permissions import IsAdminUser, IsMineralManagerOrAdmin
+from apps.accounts.throttling import AdminUploadThrottle
 from apps.compliance.views import log_audit
 from apps.minerals.permissions import get_managed_mineral_ids, user_can_manage_mineral
 
@@ -19,6 +20,12 @@ from .access import filter_layers_for_user, layers_with_mapped_data, user_has_ma
 from .filters import MapLayerFilter
 from .models import LayerUpload, LayerVersion, MapFeature, MapLayer
 from .shapefile_utils import detect_file_type
+from .upload_security import (
+    UploadValidationError,
+    check_disk_headroom,
+    validate_upload_filename,
+    validate_upload_size,
+)
 from .serializers import (
     LayerReorderSerializer,
     LayerUploadSerializer,
@@ -101,6 +108,8 @@ class MapLayerViewSet(viewsets.ModelViewSet):
         # Map tiles are fetched in bursts on load; skip default anon/user throttling.
         if self.action in ("list", "retrieve", "geojson"):
             return []
+        if self.action == "bulk_import":
+            return [AdminUploadThrottle()]
         return super().get_throttles()
 
     def perform_create(self, serializer):
@@ -218,12 +227,12 @@ class MapLayerViewSet(viewsets.ModelViewSet):
         if not upload_file:
             return Response({"detail": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
 
-        max_bytes = getattr(settings, "MAP_UPLOAD_MAX_BYTES", 50 * 1024 * 1024)
-        if upload_file.size > max_bytes:
-            return Response(
-                {"detail": f"File too large. Maximum size is {max_bytes // (1024 * 1024)} MB."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        try:
+            validate_upload_filename(upload_file.name)
+            validate_upload_size(upload_file.size, boundary=False)
+            check_disk_headroom(boundary=False)
+        except UploadValidationError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         file_type = request.data.get("file_type") or detect_file_type(upload_file.name)
         upload = LayerUpload.objects.create(

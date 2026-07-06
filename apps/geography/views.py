@@ -6,10 +6,17 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.permissions import IsAdminUser
+from apps.accounts.throttling import AdminUploadThrottle
+from apps.maps.upload_security import (
+    UploadValidationError,
+    check_disk_headroom,
+    friendly_upload_error,
+    validate_upload_filename,
+    validate_upload_size,
+)
 
 from .admin_boundary_service import (
     boundaries_feature_collection,
-    friendly_boundary_import_error,
     import_uploaded_boundaries,
     lookup_boundaries_at_point,
 )
@@ -106,6 +113,7 @@ class RegionViewSet(viewsets.ModelViewSet):
 class AdminBoundaryImportView(APIView):
     permission_classes = [IsAdminUser]
     parser_classes = [MultiPartParser, FormParser]
+    throttle_classes = [AdminUploadThrottle]
 
     def post(self, request):
         country_code = (request.data.get("country") or "TZ").upper()
@@ -119,6 +127,13 @@ class AdminBoundaryImportView(APIView):
         upload = request.FILES.get("file")
         if not upload:
             return Response({"detail": "file is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            validate_upload_filename(upload.name)
+            validate_upload_size(upload.size, boundary=True)
+            check_disk_headroom(boundary=True)
+        except UploadValidationError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         replace = str(request.data.get("replace", "true")).lower() in ("1", "true", "yes")
         async_mode = str(request.data.get("async", "false")).lower() in ("1", "true", "yes")
@@ -142,7 +157,7 @@ class AdminBoundaryImportView(APIView):
         from apps.maps.shapefile_utils import parse_upload_content
 
         try:
-            features_data = parse_upload_content(content, filename)
+            features_data = parse_upload_content(content, filename, boundary=True)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -155,10 +170,11 @@ class AdminBoundaryImportView(APIView):
             return Response({"detail": "No features found in upload."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
+            check_disk_headroom(boundary=True)
             count = import_uploaded_boundaries(country_code, level, features, replace=replace)
         except Exception as exc:
             return Response(
-                {"detail": friendly_boundary_import_error(exc)},
+                {"detail": friendly_upload_error(exc)},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return Response({"imported": count, "country": country_code, "level": level})

@@ -31,6 +31,15 @@ class OTPVerifyThrottle(SimpleRateThrottle):
         return f"otp_verify_{ident}"
 
 
+class AdminUploadThrottle(SimpleRateThrottle):
+    scope = "upload"
+
+    def get_cache_key(self, request, view):
+        if request.user and request.user.is_authenticated:
+            return f"upload_user_{request.user.pk}"
+        return f"upload_{self.get_ident(request)}"
+
+
 class PublicCatalogThrottleMixin:
     """Read-only catalog endpoints should not share the global anon burst budget."""
 

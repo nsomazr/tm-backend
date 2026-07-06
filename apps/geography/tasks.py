@@ -8,7 +8,7 @@ from .boundary_import_job import _features_from_parsed
 
 @shared_task(bind=True)
 def process_boundary_upload(self, country_code: str, level: int, content: bytes, filename: str, replace: bool = True):
-    features_data = parse_upload_content(content, filename)
+    features_data = parse_upload_content(content, filename, boundary=True)
     features = _features_from_parsed(features_data)
 
     def progress(done: int, total: int) -> None:

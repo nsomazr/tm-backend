@@ -9,8 +9,9 @@ from typing import Any
 from django.core.cache import cache
 
 from apps.maps.shapefile_utils import parse_upload_content
+from apps.maps.upload_security import check_disk_headroom, friendly_upload_error
 
-from .admin_boundary_service import friendly_boundary_import_error, import_uploaded_boundaries
+from .admin_boundary_service import import_uploaded_boundaries
 
 CACHE_PREFIX = "boundary_import:"
 CACHE_TTL = 7200
@@ -59,7 +60,8 @@ def _run_import(
             task_id,
             {"status": "processing", "phase": "parsing", "done": 0, "total": 0},
         )
-        features_data = parse_upload_content(content, filename)
+        check_disk_headroom(boundary=True)
+        features_data = parse_upload_content(content, filename, boundary=True)
         features = _features_from_parsed(features_data)
         if not features:
             _set_status(task_id, {"status": "failed", "error": "No features found in upload."})
@@ -84,6 +86,7 @@ def _run_import(
             task_id,
             {"status": "processing", "phase": "importing", "done": 0, "total": total},
         )
+        check_disk_headroom(boundary=True)
         count = import_uploaded_boundaries(
             country_code,
             level,
@@ -118,7 +121,7 @@ def _run_import(
             task_id,
             {
                 "status": "failed",
-                "error": friendly_boundary_import_error(exc),
+                "error": friendly_upload_error(exc),
             },
         )
 

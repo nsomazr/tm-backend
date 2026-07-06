@@ -13,6 +13,13 @@ from typing import Any
 import shapefile
 
 from .crs_utils import ensure_wgs84_geometry
+from .upload_security import (
+    UploadValidationError,
+    friendly_upload_error,
+    validate_feature_count,
+    validate_upload_bytes,
+    validate_zip_archive,
+)
 
 
 def detect_file_type(filename: str) -> str:
@@ -28,17 +35,29 @@ def detect_file_type(filename: str) -> str:
     return "geojson"
 
 
-def parse_upload_content(content: bytes, filename: str, file_type: str | None = None) -> list[dict[str, Any]]:
+def parse_upload_content(
+    content: bytes,
+    filename: str,
+    file_type: str | None = None,
+    *,
+    boundary: bool = False,
+) -> list[dict[str, Any]]:
     ft = file_type or detect_file_type(filename)
     try:
+        validate_upload_bytes(content, filename, boundary=boundary)
         if ft == "shapefile" or filename.lower().endswith(".shp"):
-            return shapefile_bytes_to_features(content)
-        if ft == "zip" or filename.lower().endswith(".zip"):
-            return _parse_zip(content)
-        data = _load_json_bytes(content)
-        return _normalize_features(data)
+            features = shapefile_bytes_to_features(content)
+        elif ft == "zip" or filename.lower().endswith(".zip"):
+            features = _parse_zip(content)
+        else:
+            data = _load_json_bytes(content)
+            features = _normalize_features(data)
+        validate_feature_count(len(features), boundary=boundary)
+        return features
+    except UploadValidationError as exc:
+        raise ValueError(str(exc)) from exc
     except (ValueError, json.JSONDecodeError, struct.error, shapefile.ShapefileException, OSError, UnicodeDecodeError, TypeError) as exc:
-        raise ValueError(_friendly_parse_error(exc)) from exc
+        raise ValueError(friendly_upload_error(exc)) from exc
 
 
 def _load_json_bytes(content: bytes) -> dict[str, Any]:
@@ -48,27 +67,6 @@ def _load_json_bytes(content: bytes) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("Invalid GeoJSON: expected a JSON object.")
     return data
-
-
-def _friendly_parse_error(exc: Exception) -> str:
-    message = str(exc).strip()
-    if isinstance(exc, OSError) and getattr(exc, "errno", None) == 28:
-        return "Server disk is full. Try uploading a GeoJSON file instead of a shapefile ZIP."
-    if isinstance(exc, UnicodeDecodeError):
-        return (
-            "Could not read attribute data (.dbf). "
-            "Re-export the shapefile with UTF-8 or Latin-1 text fields, "
-            "or upload GeoJSON instead."
-        )
-    if isinstance(exc, struct.error):
-        return (
-            "Could not read the shapefile inside the ZIP. "
-            "Zip the .shp, .shx, and .dbf together (same folder), "
-            "or export GeoJSON instead."
-        )
-    if "ZIP" in message or "Shapefile" in message or "GeoJSON" in message:
-        return message
-    return f"Could not parse upload: {message or exc.__class__.__name__}"
 
 
 def _is_mac_junk(name: str) -> bool:
@@ -86,14 +84,8 @@ def _is_valid_shp_entry(name: str) -> bool:
 
 
 def _parse_zip(content: bytes) -> list[dict[str, Any]]:
-    max_entries = 200
-    max_uncompressed = 100 * 1024 * 1024
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
-        if len(zf.infolist()) > max_entries:
-            raise ValueError("ZIP contains too many files.")
-        total_size = sum(info.file_size for info in zf.infolist())
-        if total_size > max_uncompressed:
-            raise ValueError("ZIP uncompressed size exceeds limit.")
+        validate_zip_archive(zf, len(content))
         names = zf.namelist()
         for name in names:
             if _is_mac_junk(name):

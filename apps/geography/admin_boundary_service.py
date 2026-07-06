@@ -13,6 +13,7 @@ from django.db import transaction
 
 from apps.maps.geometry_utils import geometry_bbox, point_in_geometry
 from apps.maps.crs_utils import ensure_wgs84_geometry
+from apps.maps.upload_security import friendly_upload_error
 
 from .country_geo import preset_for_code
 from .models import AdminBoundary, Country, Region
@@ -25,22 +26,7 @@ def boundaries_data_dir() -> Path:
 
 def friendly_boundary_import_error(exc: Exception) -> str:
     """Turn low-level OS/DB failures into a short message for the admin UI."""
-    message = str(exc).lower()
-    errno = getattr(exc, "errno", None)
-    if errno == 28 or "no space left on device" in message:
-        return (
-            "The server is out of disk space, so the boundaries could not be saved. "
-            "Free at least 1–2 GB on the machine running the backend, then upload again. "
-            "A GeoJSON file is often smaller than a shapefile ZIP."
-        )
-    if "duplicate" in message and ("entry" in message or "key" in message):
-        return (
-            "Some boundaries use duplicate codes. "
-            "Re-export with unique district names or GADM-style GID codes."
-        )
-    if "connection" in message and "refused" in message:
-        return "Could not reach the database. Check that MySQL is running and try again."
-    return "Import failed. Check the file format and try again, or upload GeoJSON instead."
+    return friendly_upload_error(exc)
 
 
 def _slug_code(value: str, fallback: str = "area") -> str:
