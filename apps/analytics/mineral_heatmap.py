@@ -12,7 +12,7 @@ from apps.maps.models import MapFeature, MapLayer
 from apps.minerals.models import Mineral
 
 from .insights import _accessible_features
-from .mineral_coverage import _find_layer_for_catalog_slug
+from .mineral_coverage import PERIODIC_LAYER_SLUGS, _find_layer_for_catalog_slug
 from .spatial_assign import feature_sample_point, layer_display_color
 
 MAX_HEATMAP_FEATURES = 5000
@@ -112,11 +112,46 @@ def heatmap_samples_for_feature(feature: MapFeature) -> list[tuple[float, float,
     return []
 
 
+def _layers_for_heatmap(
+    mineral_slug: str,
+    layers: list[MapLayer],
+    layer_ids: list[int] | None = None,
+) -> list[MapLayer]:
+    """All active map layers for a mineral, optionally filtered to visible layer ids."""
+    slug_candidates = set(PERIODIC_LAYER_SLUGS.get(mineral_slug, [mineral_slug]))
+    matched: list[MapLayer] = []
+    seen: set[int] = set()
+    for layer in layers:
+        if layer.id in seen:
+            continue
+        if layer.mineral.slug == mineral_slug or layer.slug in slug_candidates:
+            seen.add(layer.id)
+            matched.append(layer)
+    if layer_ids:
+        id_set = set(layer_ids)
+        matched = [layer for layer in matched if layer.id in id_set]
+    if matched:
+        return matched
+    single = _find_layer_for_catalog_slug(mineral_slug, layers)
+    if single and (not layer_ids or single.id in layer_ids):
+        return [single]
+    return []
+
+
+def _heatmap_display_color(layers: list[MapLayer]) -> str:
+    for layer_type in ("polygon", "point", "line"):
+        for layer in layers:
+            if layer.layer_type == layer_type:
+                return layer_display_color(layer)
+    return "#E87722"
+
+
 def build_mineral_heatmap(
     mineral_slug: str,
     *,
     country_code: str = "TZ",
     user=None,
+    layer_ids: list[int] | None = None,
     max_features: int = MAX_HEATMAP_FEATURES,
     locale: str = "en",
 ) -> dict | None:
@@ -129,13 +164,8 @@ def build_mineral_heatmap(
     layers = list(
         MapLayer.objects.filter(is_active=True, mineral__country=country).select_related("mineral")
     )
-    layer = _find_layer_for_catalog_slug(mineral_slug, layers)
-    if layer:
-        features = list(_accessible_features(user).filter(layer=layer)[:max_features])
-        color = layer_display_color(layer)
-        slug = mineral_slug
-        display_name = localized_name(layer, locale)
-    else:
+    mineral_layers = _layers_for_heatmap(mineral_slug, layers, layer_ids)
+    if not mineral_layers:
         try:
             mineral = Mineral.objects.get(slug=mineral_slug, is_active=True, country=country)
         except Mineral.DoesNotExist:
@@ -144,6 +174,18 @@ def build_mineral_heatmap(
         color = mineral.color
         slug = mineral.slug
         display_name = localized_name(mineral, locale)
+    else:
+        color = _heatmap_display_color(mineral_layers)
+        slug = mineral_slug
+        display_name = localized_name(mineral_layers[0], locale)
+        features = []
+        remaining = max_features
+        for layer in mineral_layers:
+            if remaining <= 0:
+                break
+            batch = list(_accessible_features(user).filter(layer=layer)[:remaining])
+            features.extend(batch)
+            remaining -= len(batch)
 
     points: list[dict[str, float]] = []
     for feature in features:

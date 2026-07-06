@@ -203,10 +203,21 @@ class MineralHeatmapView(PublicCatalogThrottleMixin, APIView):
             )
         country_code = (request.query_params.get("country") or "TZ").upper()
         locale = get_request_locale(request)
+        raw_layer_ids = (request.query_params.get("layer_ids") or "").strip()
+        layer_ids = None
+        if raw_layer_ids:
+            layer_ids = []
+            for part in raw_layer_ids.split(","):
+                part = part.strip()
+                if part.isdigit():
+                    layer_ids.append(int(part))
+            if not layer_ids:
+                layer_ids = None
         payload = build_mineral_heatmap(
             slug,
             country_code=country_code,
             user=request.user,
+            layer_ids=layer_ids,
             locale=locale,
         )
         if not payload:
