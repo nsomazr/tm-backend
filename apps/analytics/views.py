@@ -192,6 +192,8 @@ class MineralHeatmapView(PublicCatalogThrottleMixin, APIView):
         from .mineral_exploration import get_mineral_exploration_quota, user_can_view_mineral_heatmap
 
         quota = get_mineral_exploration_quota(request, request.user)
+        if slug == "general":
+            return Response({"detail": "Heatmap is only available for mapped commodity layers."}, status=404)
         if not user_can_view_mineral_heatmap(request.user, quota, slug):
             return Response(
                 {
@@ -213,6 +215,11 @@ class MineralHeatmapView(PublicCatalogThrottleMixin, APIView):
                     layer_ids.append(int(part))
             if not layer_ids:
                 layer_ids = None
+        if not layer_ids:
+            return Response(
+                {"detail": "Select one or more map layers to build a mineral heatmap."},
+                status=400,
+            )
         payload = build_mineral_heatmap(
             slug,
             country_code=country_code,
