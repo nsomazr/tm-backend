@@ -1,3 +1,7 @@
+import shutil
+from pathlib import Path
+
+from django.conf import settings
 from django.core.management.base import BaseCommand
 
 from apps.maps.models import MapFeature, MapLayer
@@ -5,8 +9,8 @@ from apps.maps.models import MapFeature, MapLayer
 
 class Command(BaseCommand):
     help = (
-        "Deactivate demo polygon and line map layers and clear their features "
-        "(fresh shapefile mapping)."
+        "Remove demo polygon and line map layers, clear their features, "
+        "and delete the bundled sample-data folder."
     )
 
     def add_arguments(self, parser):
@@ -35,6 +39,12 @@ class Command(BaseCommand):
             self.stdout.write(f"Deactivated {feature_count} demo feature(s).")
 
         demo_layers.update(is_active=False)
+
+        sample_data_dir = Path(settings.BASE_DIR) / "sample_data"
+        if sample_data_dir.exists():
+            shutil.rmtree(sample_data_dir)
+            self.stdout.write(self.style.WARNING(f"Deleted sample data directory: {sample_data_dir}"))
+
         self.stdout.write(
             self.style.SUCCESS(
                 f"Deactivated {layer_count} demo layer(s). "
