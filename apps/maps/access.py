@@ -1,16 +1,56 @@
 """Map layer access rules for list/geojson/insights."""
 
+from django.conf import settings
 from django.db.models import Count, Q
 
 from apps.accounts.models import User
 
 
 def user_has_map_detail_access(user) -> bool:
-    if not user.is_authenticated:
+    if user is None or not user.is_authenticated:
         return False
     if user.has_paid_access or user.is_admin_user:
         return True
     return user.role == User.Role.MINERAL_MANAGER
+
+
+def preview_coord_decimals() -> int:
+    """Decimal places of coordinate precision served to non-paying users.
+
+    Fewer decimals => coarser location (2 ≈ 1.1 km, 3 ≈ 110 m, 4 ≈ 11 m). This
+    keeps the free map a usable teaser while making exact dig coordinates
+    unusable for bulk scraping. Configurable via MAP_PREVIEW_COORD_DECIMALS.
+    """
+    return int(getattr(settings, "MAP_PREVIEW_COORD_DECIMALS", 2))
+
+
+def _round_coords(coords, ndigits):
+    if isinstance(coords, (int, float)):
+        return round(coords, ndigits)
+    if isinstance(coords, (list, tuple)):
+        return [_round_coords(c, ndigits) for c in coords]
+    return coords
+
+
+def coarsen_geometry(geometry, ndigits=None):
+    """Return a copy of a GeoJSON geometry with coordinates rounded to ``ndigits``.
+
+    Used to degrade precision for anonymous/free users so the crown-jewel exact
+    coordinates never leave the server at full resolution.
+    """
+    if not isinstance(geometry, dict):
+        return geometry
+    if ndigits is None:
+        ndigits = preview_coord_decimals()
+    if geometry.get("type") == "GeometryCollection":
+        return {
+            **geometry,
+            "geometries": [coarsen_geometry(g, ndigits) for g in geometry.get("geometries", [])],
+        }
+    coords = geometry.get("coordinates")
+    if coords is None:
+        return geometry
+    return {**geometry, "coordinates": _round_coords(coords, ndigits)}
 
 
 def layers_with_mapped_data(queryset):

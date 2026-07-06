@@ -5,20 +5,27 @@ from django.db import transaction
 from django.db.models import Prefetch
 from django.http import HttpResponse
 from rest_framework import status, viewsets
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.parsers import FormParser, MultiPartParser
-from rest_framework.permissions import IsAuthenticatedOrReadOnly
+from rest_framework.permissions import AllowAny, IsAuthenticated, IsAuthenticatedOrReadOnly
 from rest_framework.response import Response
 
 from apps.accounts.models import User
 from apps.accounts.permissions import IsAdminUser, IsMineralManagerOrAdmin
-from apps.accounts.throttling import AdminUploadThrottle
+from apps.accounts.throttling import AdminUploadThrottle, MapGeojsonAnonThrottle
 from apps.compliance.views import log_audit
 from apps.minerals.permissions import get_managed_mineral_ids, user_can_manage_mineral
 
-from .access import filter_layers_for_user, layers_with_mapped_data, user_has_map_detail_access
+from .access import (
+    coarsen_geometry,
+    filter_layers_for_user,
+    layers_with_mapped_data,
+    preview_coord_decimals,
+    user_has_map_detail_access,
+)
 from .filters import MapLayerFilter
-from .models import LayerUpload, LayerVersion, MapFeature, MapLayer
+from .models import LayerUpload, LayerVersion, MapFeature, MapLayer, MapPlatformSettings, SavedExploration
+from .map_settings import is_valid_coordinate_system
 from .shapefile_utils import detect_file_type
 from .upload_security import (
     UploadValidationError,
@@ -33,6 +40,7 @@ from .serializers import (
     MapFeatureSerializer,
     MapLayerDetailSerializer,
     MapLayerSerializer,
+    SavedExplorationSerializer,
 )
 
 
@@ -66,6 +74,10 @@ class MapLayerViewSet(viewsets.ModelViewSet):
         if self.action in ("list", "retrieve", "geojson"):
             if self._include_inactive_list():
                 qs = MapLayer.objects.all().select_related("mineral", "region")
+            elif self.action == "geojson" and self._can_manage_layers():
+                # Managers/admins must preview geometry for layers they edit, including
+                # inactive layers that still have uploaded features.
+                qs = MapLayer.objects.all().select_related("mineral", "region")
             else:
                 qs = MapLayer.objects.filter(is_active=True).select_related("mineral", "region")
         else:
@@ -89,6 +101,11 @@ class MapLayerViewSet(viewsets.ModelViewSet):
                 if managed is not None:
                     return qs.filter(mineral_id__in=managed).order_by("z_index", "name")
                 return qs.order_by("z_index", "name")
+            if self.action == "geojson" and self._can_manage_layers():
+                managed = get_managed_mineral_ids(self.request.user)
+                if managed is not None:
+                    qs = qs.filter(mineral_id__in=managed)
+                return qs.order_by("z_index", "name")
             qs = layers_with_mapped_data(qs)
             return filter_layers_for_user(qs, self.request.user).order_by("z_index", "name")
 
@@ -105,9 +122,13 @@ class MapLayerViewSet(viewsets.ModelViewSet):
         return super().get_permissions()
 
     def get_throttles(self):
-        # Map tiles are fetched in bursts on load; skip default anon/user throttling.
-        if self.action in ("list", "retrieve", "geojson"):
+        # Layer list carries no geometry; keep it unthrottled for snappy loads.
+        if self.action == "list":
             return []
+        # Geometry-serving reads: throttle anonymous bulk fetching (scraping
+        # defence). Logged-in users are unaffected by the anon throttle.
+        if self.action in ("retrieve", "geojson"):
+            return [MapGeojsonAnonThrottle()]
         if self.action == "bulk_import":
             return [AdminUploadThrottle()]
         return super().get_throttles()
@@ -115,12 +136,16 @@ class MapLayerViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         from django.utils.text import slugify
 
-        from .layer_defaults import get_or_create_general_mineral
+        from .layer_defaults import get_or_create_mineral_for_layer
 
         name = serializer.validated_data.get("name", "layer")
         slug = slugify(name)
         counter = 1
-        mineral = serializer.validated_data.get("mineral") or get_or_create_general_mineral()
+        mineral = serializer.validated_data.get("mineral") or get_or_create_mineral_for_layer(name)
+        if not user_can_manage_mineral(self.request.user, mineral.id):
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied("Not allowed to create layers for this mineral.")
         base = slug
         while MapLayer.objects.filter(mineral=mineral, slug=slug).exists():
             slug = f"{base}-{counter}"
@@ -140,6 +165,11 @@ class MapLayerViewSet(viewsets.ModelViewSet):
         )
 
     def perform_update(self, serializer):
+        mineral = serializer.validated_data.get("mineral")
+        if mineral is not None and not user_can_manage_mineral(self.request.user, mineral.id):
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied("Not allowed to update layers for this mineral.")
         layer = serializer.save()
         log_audit(
             self.request,
@@ -171,6 +201,7 @@ class MapLayerViewSet(viewsets.ModelViewSet):
         layer = self.get_object()
         features = layer.features.filter(is_active=True)
         has_detail = user_has_map_detail_access(request.user)
+        decimals = preview_coord_decimals()
 
         def props_for(f):
             base = {
@@ -182,12 +213,19 @@ class MapLayerViewSet(viewsets.ModelViewSet):
                 return {**f.properties, **base, "label": f.label}
             return {**base, "label": f.label or ""}
 
+        def geom_for(f):
+            # Full-resolution geometry is a paid asset: degrade precision for
+            # anonymous / free users so exact coordinates can't be scraped.
+            if has_detail:
+                return f.geometry
+            return coarsen_geometry(f.geometry, decimals)
+
         fc = {
             "type": "FeatureCollection",
             "features": [
                 {
                     "type": "Feature",
-                    "geometry": f.geometry,
+                    "geometry": geom_for(f),
                     "properties": props_for(f),
                 }
                 for f in features
@@ -312,7 +350,11 @@ class MapFeatureViewSet(viewsets.ModelViewSet):
         if not user_can_manage_mineral(self.request.user, layer.mineral_id):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("Cannot manage features for this mineral.")
-        serializer.save()
+        feature = serializer.save(created_by=self.request.user)
+        if not layer.is_active:
+            layer.is_active = True
+            layer.save(update_fields=["is_active"])
+        return feature
 
 
 class LayerVersionViewSet(viewsets.ReadOnlyModelViewSet):
@@ -346,3 +388,49 @@ class LayerUploadViewSet(viewsets.ReadOnlyModelViewSet):
         if manager_only == "1" and self.request.user.is_admin_user:
             return qs.filter(uploaded_by__role=User.Role.MINERAL_MANAGER)
         return qs
+
+
+class SavedExplorationViewSet(viewsets.ModelViewSet):
+    """Paid users' saved draw-and-explore areas. Creation is gated by plan."""
+
+    serializer_class = SavedExplorationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return SavedExploration.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        if not getattr(self.request.user, "can_save_explorations", False):
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied("Saving explorations is not included in your plan.")
+        serializer.save(user=self.request.user)
+
+
+@api_view(["GET", "PATCH"])
+@permission_classes([AllowAny])
+def map_platform_settings(request):
+    solo = MapPlatformSettings.get_solo()
+
+    if request.method == "GET":
+        return Response({"coordinate_system": solo.coordinate_system})
+
+    if not IsAdminUser().has_permission(request, None):
+        return Response({"detail": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
+
+    crs = request.data.get("coordinate_system")
+    if not isinstance(crs, str) or not is_valid_coordinate_system(crs):
+        return Response(
+            {"coordinate_system": ["Unknown or invalid coordinate system."]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    solo.coordinate_system = crs
+    solo.save(update_fields=["coordinate_system", "updated_at"])
+    log_audit(
+        request,
+        "map_settings_update",
+        "MapPlatformSettings",
+        solo.pk,
+        {"coordinate_system": crs},
+    )
+    return Response({"coordinate_system": solo.coordinate_system})

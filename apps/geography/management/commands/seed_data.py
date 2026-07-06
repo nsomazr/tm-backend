@@ -15,7 +15,7 @@ class Command(BaseCommand):
                 "name": "Monthly Standard",
                 "description": "Terra insights, show-on-map, full AI, analytics, and 3 PDF downloads per month",
                 "billing_cycle": "monthly",
-                "price": 50000,
+                "price": 100000,
                 "currency": "TZS",
                 "included_report_downloads": 3,
             },
@@ -23,15 +23,21 @@ class Command(BaseCommand):
         monthly.included_report_downloads = 3
         monthly.included_assistant_credits = 3000
         monthly.includes_chat_history = True
+        monthly.max_explorable_minerals = 10
         monthly.description = (
-            "Terra insights, show-on-map, full AI, analytics, and 3 PDF downloads per month"
+            "More access to advanced Terra insights — 10 mineral deep-explores per month"
         )
+        monthly.name = "Plus"
+        monthly.price = 100000
         monthly.save(
             update_fields=[
+                "name",
                 "description",
+                "price",
                 "included_report_downloads",
                 "included_assistant_credits",
                 "includes_chat_history",
+                "max_explorable_minerals",
             ]
         )
         annual, _ = SubscriptionPlan.objects.get_or_create(
@@ -40,7 +46,7 @@ class Command(BaseCommand):
                 "name": "Annual Standard",
                 "description": "Full year: Terra insights, show-on-map, full AI, analytics, and 10 PDF downloads",
                 "billing_cycle": "annual",
-                "price": 480000,
+                "price": 1800000,
                 "currency": "TZS",
                 "included_report_downloads": 10,
             },
@@ -48,15 +54,56 @@ class Command(BaseCommand):
         annual.included_report_downloads = 10
         annual.included_assistant_credits = 5000
         annual.includes_chat_history = True
+        annual.max_explorable_minerals = None
         annual.description = (
-            "Full year: Terra insights, show-on-map, full AI, analytics, and 10 PDF downloads"
+            "Unlimited mineral exploration all year with full Terra intelligence"
         )
+        annual.name = "Pro"
+        annual.price = 1800000
         annual.save(
             update_fields=[
+                "name",
                 "description",
+                "price",
                 "included_report_downloads",
                 "included_assistant_credits",
                 "includes_chat_history",
+                "max_explorable_minerals",
+            ]
+        )
+
+        starter, _ = SubscriptionPlan.objects.get_or_create(
+            slug="monthly-starter",
+            defaults={
+                "name": "Monthly Starter",
+                "description": "Explore up to 5 minerals per month with Terra insights and map tools",
+                "billing_cycle": "monthly",
+                "price": 50000,
+                "currency": "TZS",
+                "included_report_downloads": 1,
+                "included_assistant_credits": 1500,
+                "includes_chat_history": True,
+                "max_explorable_minerals": 5,
+            },
+        )
+        starter.name = "Starter"
+        starter.description = "Keep exploring — 5 mineral deep-explores per month"
+        starter.max_explorable_minerals = 5
+        starter.included_assistant_credits = 1500
+        starter.included_report_downloads = 1
+        starter.includes_chat_history = True
+        starter.is_active = True
+        starter.price = 50000
+        starter.save(
+            update_fields=[
+                "name",
+                "description",
+                "price",
+                "max_explorable_minerals",
+                "included_assistant_credits",
+                "included_report_downloads",
+                "includes_chat_history",
+                "is_active",
             ]
         )
         TermsVersion.objects.get_or_create(

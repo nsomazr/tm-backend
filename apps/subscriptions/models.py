@@ -31,6 +31,18 @@ class SubscriptionPlan(models.Model):
         default=False,
         help_text="Subscribers can persist Ask Terra chat threads across sessions.",
     )
+    includes_saved_explorations = models.BooleanField(
+        default=False,
+        help_text="Subscribers can save drawn exploration areas (points/lines/polygons) to their account.",
+    )
+    max_explorable_minerals = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Max unique minerals a subscriber can deep-explore per calendar month. "
+            "Leave blank for unlimited (11+). Free accounts always get 0."
+        ),
+    )
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

@@ -2,6 +2,7 @@ from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from apps.analytics.credits import get_assistant_credit_quota
+from apps.analytics.mineral_exploration import get_mineral_exploration_quota
 
 from .models import User
 from .staff_sync import is_privileged_role, sync_user_staff_flags
@@ -9,7 +10,9 @@ from .staff_sync import is_privileged_role, sync_user_staff_flags
 
 class UserSerializer(serializers.ModelSerializer):
     has_paid_access = serializers.BooleanField(read_only=True)
+    can_save_explorations = serializers.BooleanField(read_only=True)
     assistant_credits = serializers.SerializerMethodField()
+    mineral_exploration = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -24,7 +27,9 @@ class UserSerializer(serializers.ModelSerializer):
             "organization",
             "profile_complete",
             "has_paid_access",
+            "can_save_explorations",
             "assistant_credits",
+            "mineral_exploration",
             "created_at",
         )
         read_only_fields = ("id", "role", "created_at")
@@ -34,6 +39,12 @@ class UserSerializer(serializers.ModelSerializer):
         if not request:
             return None
         return get_assistant_credit_quota(request, obj)
+
+    def get_mineral_exploration(self, obj):
+        request = self.context.get("request")
+        if not request:
+            return None
+        return get_mineral_exploration_quota(request, obj)
 
 
 class ProfileCompleteSerializer(serializers.ModelSerializer):

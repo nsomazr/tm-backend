@@ -41,6 +41,12 @@ class Mineral(models.Model):
         related_name="minerals",
     )
     color = models.CharField(max_length=7, default="#E87722")
+    color_rgba = models.CharField(
+        max_length=40,
+        blank=True,
+        default="",
+        help_text="RGBA fill derived from color hex (e.g. rgba(232,119,34,0.55))",
+    )
     icon = models.CharField(max_length=50, blank=True)
     description = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
@@ -56,6 +62,11 @@ class Mineral(models.Model):
     def save(self, *args, **kwargs):
         if not self.slug:
             self.slug = slugify(self.name)
+        if self.color:
+            from .color_utils import hex_to_rgba, normalize_hex
+
+            self.color = normalize_hex(self.color, fallback=self.color)
+            self.color_rgba = hex_to_rgba(self.color, 0.55)
         super().save(*args, **kwargs)
 
 

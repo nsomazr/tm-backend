@@ -5,13 +5,59 @@ from rest_framework import serializers
 from apps.maps.localization import get_request_locale, localized_name
 from apps.minerals.models import Mineral
 
-from .models import LayerUpload, LayerVersion, MapFeature, MapLayer
+from apps.minerals.color_utils import enrich_layer_style
+
+from .models import LayerUpload, LayerVersion, MapFeature, MapLayer, SavedExploration
 
 
 def _user_display_name(user) -> str | None:
     if not user:
         return None
     return user.get_full_name() or user.username or None
+
+
+_LAYER_GEOMETRY_TYPES = {
+    "point": ("Point", "MultiPoint"),
+    "line": ("LineString", "MultiLineString"),
+    "polygon": ("Polygon", "MultiPolygon"),
+}
+
+
+def _centroid_from_geometry(geometry: dict) -> tuple[float | None, float | None]:
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates")
+    if not coords:
+        return None, None
+
+    points: list[list[float]] = []
+    if gtype == "Point":
+        points = [coords]
+    elif gtype == "MultiPoint":
+        points = coords
+    elif gtype == "LineString":
+        points = coords
+    elif gtype == "MultiLineString":
+        for part in coords:
+            points.extend(part)
+    elif gtype == "Polygon":
+        ring = coords[0]
+        if len(ring) > 1 and ring[0] == ring[-1]:
+            points = ring[:-1]
+        else:
+            points = ring
+    elif gtype == "MultiPolygon":
+        for poly in coords:
+            ring = poly[0]
+            if len(ring) > 1 and ring[0] == ring[-1]:
+                points.extend(ring[:-1])
+            else:
+                points.extend(ring)
+
+    if not points:
+        return None, None
+    lng = sum(p[0] for p in points) / len(points)
+    lat = sum(p[1] for p in points) / len(points)
+    return lat, lng
 
 
 class MapFeatureSerializer(serializers.ModelSerializer):
@@ -26,10 +72,11 @@ class MapFeatureSerializer(serializers.ModelSerializer):
             "longitude",
             "label",
             "is_active",
+            "created_by",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("created_at", "updated_at")
+        read_only_fields = ("created_at", "updated_at", "created_by")
 
     def validate_geometry(self, value):
         if not isinstance(value, dict):
@@ -37,6 +84,41 @@ class MapFeatureSerializer(serializers.ModelSerializer):
         if "type" not in value:
             raise serializers.ValidationError("Geometry must have a type field.")
         return value
+
+    def validate(self, attrs):
+        layer = attrs.get("layer") or getattr(self.instance, "layer", None)
+        geometry = attrs.get("geometry") or getattr(self.instance, "geometry", None)
+        if layer and geometry:
+            allowed = _LAYER_GEOMETRY_TYPES.get(layer.layer_type, ())
+            gtype = geometry.get("type")
+            if gtype not in allowed:
+                raise serializers.ValidationError(
+                    {
+                        "geometry": (
+                            f"Layer type “{layer.layer_type}” expects "
+                            f"{', '.join(allowed)} geometry, not {gtype}."
+                        )
+                    }
+                )
+        return attrs
+
+    def create(self, validated_data):
+        geometry = validated_data.get("geometry")
+        if geometry:
+            lat, lng = _centroid_from_geometry(geometry)
+            if lat is not None and lng is not None:
+                validated_data.setdefault("latitude", lat)
+                validated_data.setdefault("longitude", lng)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        geometry = validated_data.get("geometry", instance.geometry)
+        if geometry:
+            lat, lng = _centroid_from_geometry(geometry)
+            if lat is not None and lng is not None:
+                validated_data.setdefault("latitude", lat)
+                validated_data.setdefault("longitude", lng)
+        return super().update(instance, validated_data)
 
 
 class MapLayerSerializer(serializers.ModelSerializer):
@@ -115,12 +197,61 @@ class MapLayerSerializer(serializers.ModelSerializer):
         version = self._latest_version(obj)
         return version.created_at if version else None
 
+    def validate_style(self, value):
+        layer_type = (
+            self.initial_data.get("layer_type")
+            if hasattr(self, "initial_data")
+            else None
+        )
+        if not layer_type and self.instance:
+            layer_type = self.instance.layer_type
+        return enrich_layer_style(value or {}, layer_type or "polygon")
+
+    def create(self, validated_data):
+        layer = super().create(validated_data)
+        self._sync_mineral_color(layer)
+        return layer
+
+    def update(self, instance, validated_data):
+        layer = super().update(instance, validated_data)
+        if "style" in validated_data:
+            self._sync_mineral_color(layer)
+        return layer
+
+    def _sync_mineral_color(self, layer):
+        from apps.maps.layer_defaults import sync_mineral_color_from_layer
+
+        if layer.mineral_id and layer.style:
+            sync_mineral_color_from_layer(layer.mineral, layer.style, layer.layer_type)
+
 
 class MapLayerDetailSerializer(MapLayerSerializer):
     features = MapFeatureSerializer(many=True, read_only=True)
 
     class Meta(MapLayerSerializer.Meta):
         fields = MapLayerSerializer.Meta.fields + ("features",)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Match the geojson endpoint: anonymous / free users get precision-reduced
+        # geometry and no detailed feature properties. Paid users see full data.
+        from .access import coarsen_geometry, preview_coord_decimals, user_has_map_detail_access
+
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request else None
+        if user_has_map_detail_access(user):
+            return data
+
+        decimals = preview_coord_decimals()
+        for feature in data.get("features", []):
+            if feature.get("geometry"):
+                feature["geometry"] = coarsen_geometry(feature["geometry"], decimals)
+            feature["properties"] = {}
+            if feature.get("latitude") is not None:
+                feature["latitude"] = round(float(feature["latitude"]), decimals)
+            if feature.get("longitude") is not None:
+                feature["longitude"] = round(float(feature["longitude"]), decimals)
+        return data
 
 
 class LayerVersionSerializer(serializers.ModelSerializer):
@@ -188,3 +319,37 @@ class LayerUploadSerializer(serializers.ModelSerializer):
 
 class LayerReorderSerializer(serializers.Serializer):
     layer_ids = serializers.ListField(child=serializers.IntegerField())
+
+
+class SavedExplorationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SavedExploration
+        fields = ("id", "name", "mode", "points", "created_at", "updated_at")
+        read_only_fields = ("created_at", "updated_at")
+
+    def validate_points(self, value):
+        if not isinstance(value, list) or not value:
+            raise serializers.ValidationError("points must be a non-empty list of [lng, lat] pairs.")
+        cleaned: list[list[float]] = []
+        for pair in value:
+            if (
+                not isinstance(pair, (list, tuple))
+                or len(pair) != 2
+                or not all(isinstance(n, (int, float)) for n in pair)
+            ):
+                raise serializers.ValidationError("Each point must be a [lng, lat] numeric pair.")
+            lng, lat = float(pair[0]), float(pair[1])
+            if not (-180 <= lng <= 180 and -90 <= lat <= 90):
+                raise serializers.ValidationError("Coordinates out of range.")
+            cleaned.append([lng, lat])
+        if len(cleaned) > 500:
+            raise serializers.ValidationError("Too many points (max 500).")
+        return cleaned
+
+    def validate(self, attrs):
+        mode = attrs.get("mode", getattr(self.instance, "mode", "point"))
+        points = attrs.get("points", getattr(self.instance, "points", []))
+        minimum = {"point": 1, "line": 2, "polygon": 3}.get(mode, 1)
+        if len(points) < minimum:
+            raise serializers.ValidationError(f"A {mode} needs at least {minimum} point(s).")
+        return attrs

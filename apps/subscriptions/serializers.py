@@ -28,6 +28,8 @@ class SubscriptionPlanSerializer(serializers.ModelSerializer):
             "included_report_downloads",
             "included_assistant_credits",
             "includes_chat_history",
+            "includes_saved_explorations",
+            "max_explorable_minerals",
             "is_active",
         )
 

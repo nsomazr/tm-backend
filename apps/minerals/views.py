@@ -12,6 +12,7 @@ from .serializers import (
     MineralCategorySerializer,
     MineralManagerAssignmentSerializer,
     MineralSerializer,
+    SyncMineralManagerAssignmentsSerializer,
 )
 
 
@@ -57,12 +58,17 @@ class MineralViewSet(viewsets.ModelViewSet):
         sync = self.request.data.get("sync_layer_colors")
         if sync and "color" in serializer.validated_data:
             from apps.maps.models import MapLayer
+            from apps.minerals.color_utils import enrich_layer_style
 
             for layer in MapLayer.objects.filter(mineral=instance, is_active=True):
-                style = dict(layer.style or {})
-                style["fill"] = instance.color
+                style = enrich_layer_style(layer.style or {}, layer.layer_type)
+                hex_color = instance.color
+                style["fill"] = hex_color
                 if layer.layer_type in ("polygon", "point"):
-                    style["stroke"] = instance.color if layer.layer_type == "polygon" else "#ffffff"
+                    style["stroke"] = hex_color if layer.layer_type == "polygon" else "#ffffff"
+                elif layer.layer_type == "line":
+                    style["stroke"] = hex_color
+                style = enrich_layer_style(style, layer.layer_type)
                 layer.style = style
                 layer.save(update_fields=["style"])
 
@@ -86,3 +92,19 @@ class MineralManagerAssignmentViewSet(viewsets.ModelViewSet):
     serializer_class = MineralManagerAssignmentSerializer
     permission_classes = [IsAdminUser]
     filterset_fields = ["user", "mineral"]
+
+    @action(detail=False, methods=["post"])
+    def sync(self, request):
+        """Set all mineral/commodity assignments for one manager."""
+        serializer = SyncMineralManagerAssignmentsSerializer(
+            data=request.data,
+            context={"request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+        assignments = serializer.save()
+        output = MineralManagerAssignmentSerializer(
+            assignments,
+            many=True,
+            context={"request": request},
+        )
+        return Response(output.data)

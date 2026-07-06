@@ -105,3 +105,32 @@ class AerialAnalysisGrant(models.Model):
 
     def __str__(self):
         return f"{self.user_id} · {self.max_area_km2} km² @ {self.lat:.2f},{self.lng:.2f}"
+
+
+class MineralExplorationLog(models.Model):
+    """Tracks unique minerals a user deep-explores (coverage / heatmap) per period."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="mineral_exploration_logs",
+    )
+    mineral_slug = models.SlugField(max_length=220)
+    subscription = models.ForeignKey(
+        "subscriptions.UserSubscription",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="mineral_exploration_logs",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "mineral_slug", "created_at"]),
+            models.Index(fields=["user", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} · {self.mineral_slug}"

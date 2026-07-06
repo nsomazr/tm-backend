@@ -48,6 +48,26 @@ class User(AbstractUser):
             qs = qs.exclude(payment_orders__payment_provider="simulated")
         return qs.distinct().exists()
 
+    @property
+    def can_save_explorations(self):
+        """Whether the user's plan allows saving drawn exploration areas."""
+        if self.is_admin_user:
+            return True
+        today = timezone.now().date()
+        from django.conf import settings
+
+        from apps.payments.models import PaymentOrder
+
+        qs = self.subscriptions.filter(
+            status="active",
+            end_date__gte=today,
+            plan__includes_saved_explorations=True,
+            payment_orders__status=PaymentOrder.Status.COMPLETED,
+        )
+        if not getattr(settings, "PAYMENTS_SIMULATE", False):
+            qs = qs.exclude(payment_orders__payment_provider="simulated")
+        return qs.distinct().exists()
+
     def __str__(self):
         return self.email or self.username
 

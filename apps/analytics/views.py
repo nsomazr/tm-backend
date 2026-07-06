@@ -53,6 +53,12 @@ from .mineral_coverage import (
     build_mineral_catalog,
     mineral_catalog_stats,
 )
+from .mineral_exploration import (
+    MineralExplorationLimitExceeded,
+    can_explore_mineral,
+    ensure_mineral_exploration_allowed,
+    get_mineral_exploration_quota,
+)
 from .insight_export import build_insight_export_for_user
 
 REPORT_EXPORT_CREDITS = 5
@@ -154,6 +160,13 @@ class MineralBoundaryCoverageView(PublicCatalogThrottleMixin, APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, slug: str):
+        try:
+            quota = ensure_mineral_exploration_allowed(request, slug)
+        except MineralExplorationLimitExceeded as exc:
+            return Response(
+                {"detail": str(exc), "quota": exc.quota, "mineral_slug": exc.slug},
+                status=403,
+            )
         country_code = (request.query_params.get("country") or "TZ").upper()
         include_villages = request.query_params.get("include_villages", "").lower() in ("1", "true", "yes")
         if request.user.is_authenticated and getattr(request.user, "has_paid_access", False):
@@ -166,7 +179,45 @@ class MineralBoundaryCoverageView(PublicCatalogThrottleMixin, APIView):
         )
         if not payload:
             return Response({"detail": "Mineral not found."}, status=404)
+        payload["exploration_quota"] = quota
         return Response(payload)
+
+
+class MineralHeatmapView(PublicCatalogThrottleMixin, APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, slug: str):
+        from .mineral_heatmap import build_mineral_heatmap
+
+        quota = get_mineral_exploration_quota(request, request.user)
+        if not can_explore_mineral(quota, slug):
+            return Response(
+                {
+                    "detail": "Mineral exploration limit reached for your plan.",
+                    "quota": quota,
+                    "mineral_slug": slug,
+                },
+                status=403,
+            )
+        country_code = (request.query_params.get("country") or "TZ").upper()
+        locale = get_request_locale(request)
+        payload = build_mineral_heatmap(
+            slug,
+            country_code=country_code,
+            user=request.user,
+            locale=locale,
+        )
+        if not payload:
+            return Response({"detail": "Mineral not found."}, status=404)
+        payload["exploration_quota"] = quota
+        return Response(payload)
+
+
+class MineralExplorationQuotaView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response(get_mineral_exploration_quota(request, request.user))
 
 
 class SearchContextInsightsView(PublicCatalogThrottleMixin, APIView):
@@ -748,3 +799,12 @@ class AdminPlatformAnalyticsView(APIView):
 
     def get(self, request):
         return Response(build_admin_platform_analytics())
+
+
+class AdminManagerPerformanceView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        from .manager_performance import build_manager_performance_review
+
+        return Response(build_manager_performance_review())

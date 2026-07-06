@@ -40,6 +40,16 @@ class AdminUploadThrottle(SimpleRateThrottle):
         return f"upload_{self.get_ident(request)}"
 
 
+class MapGeojsonAnonThrottle(AnonRateThrottle):
+    """Rate-limit anonymous bulk fetching of map geometry (scraping defence).
+
+    AnonRateThrottle only applies to unauthenticated requests, so paying/logged-in
+    users are unaffected.
+    """
+
+    scope = "map_geojson"
+
+
 class PublicCatalogThrottleMixin:
     """Read-only catalog endpoints should not share the global anon burst budget."""
 

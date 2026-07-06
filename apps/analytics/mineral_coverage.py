@@ -55,12 +55,17 @@ def _layer_catalog_entry(
     feature_count: int,
     locale: str,
 ) -> dict:
+    style = layer.style or {}
+    fill_rgba = style.get("fillRgba") if isinstance(style.get("fillRgba"), str) else ""
+    if not fill_rgba and layer.mineral_id:
+        fill_rgba = layer.mineral.color_rgba or ""
     return {
         "id": layer.id,
         "slug": slug,
         "name": localized_name(layer, locale),
         "name_sw": layer.name_sw or "",
         "color": layer_display_color(layer),
+        "color_rgba": fill_rgba,
         "description": layer.description or "",
         "feature_count": feature_count,
         "is_mapped": feature_count > 0,
@@ -114,6 +119,7 @@ def build_mineral_catalog(*, country_code: str = "TZ", user=None, locale: str = 
             "name": localized_name(mineral, locale),
             "name_sw": mineral.name_sw,
             "color": mineral.color,
+            "color_rgba": mineral.color_rgba or "",
             "description": mineral.description or "",
             "feature_count": feature_count,
             "is_mapped": feature_count > 0,

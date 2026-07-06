@@ -10,6 +10,7 @@ class SubscriptionPlanAdmin(admin.ModelAdmin):
         "billing_cycle",
         "price",
         "currency",
+        "max_explorable_minerals",
         "included_assistant_credits",
         "included_report_downloads",
         "is_active",

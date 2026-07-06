@@ -1,4 +1,5 @@
 import json
+import logging
 import zipfile
 from io import BytesIO
 
@@ -6,6 +7,8 @@ from celery import shared_task
 from django.conf import settings
 from django.db import transaction
 from django.db.utils import OperationalError
+
+logger = logging.getLogger(__name__)
 
 from .models import LayerUpload, LayerVersion, MapFeature, MapLayer
 from .shapefile_utils import detect_file_type, parse_upload_content
@@ -118,7 +121,11 @@ def process_layer_upload(upload_id):
             count = import_features_for_layer(layer, features_data, source=filename)
 
             layer.current_version += 1
-            layer.save(update_fields=["current_version"])
+            update_fields = ["current_version"]
+            if count > 0:
+                layer.is_active = True
+                update_fields.append("is_active")
+            layer.save(update_fields=update_fields)
 
             LayerVersion.objects.create(
                 layer=layer,
@@ -129,7 +136,14 @@ def process_layer_upload(upload_id):
             )
 
         upload.status = LayerUpload.Status.COMPLETED
-        upload.save(update_fields=["status"])
+        # The parsed coordinates now live in the DB; delete the raw uploaded
+        # shapefile so we don't retain a second plaintext copy at rest.
+        try:
+            if upload.file:
+                upload.file.delete(save=False)
+        except Exception:
+            logger.warning("Could not delete raw upload file for upload %s", upload.id)
+        upload.save(update_fields=["status", "file"])
     except OperationalError as exc:
         upload.status = LayerUpload.Status.FAILED
         upload.error_message = friendly_upload_error(exc)

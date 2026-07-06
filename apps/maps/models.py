@@ -69,6 +69,13 @@ class MapFeature(models.Model):
         max_digits=10, decimal_places=7, null=True, blank=True
     )
     label = models.CharField(max_length=255, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_features",
+    )
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -134,3 +141,53 @@ class LayerUpload(models.Model):
 
     def __str__(self):
         return f"Upload {self.id} for {self.layer.name}"
+
+
+class SavedExploration(models.Model):
+    """A paid user's saved draw-and-explore area (point / line / polygon)."""
+
+    class Mode(models.TextChoices):
+        POINT = "point", "Point"
+        LINE = "line", "Line"
+        POLYGON = "polygon", "Polygon"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="saved_explorations",
+    )
+    name = models.CharField(max_length=120)
+    mode = models.CharField(max_length=10, choices=Mode.choices, default=Mode.POINT)
+    points = models.JSONField(help_text="List of [lng, lat] WGS84 vertices.")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.name} ({self.mode}) - {self.user_id}"
+
+
+class MapPlatformSettings(models.Model):
+    """Singleton platform-wide map display settings."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1)
+    coordinate_system = models.CharField(max_length=32, default="arc1960")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Map platform settings"
+        verbose_name_plural = "Map platform settings"
+
+    def __str__(self):
+        return f"Map settings (CRS: {self.coordinate_system})"
+
+    @classmethod
+    def get_solo(cls):
+        obj, _ = cls.objects.get_or_create(
+            pk=1,
+            defaults={"coordinate_system": "arc1960"},
+        )
+        return obj
+
