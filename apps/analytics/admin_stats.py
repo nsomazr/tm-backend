@@ -1,8 +1,8 @@
+from collections import Counter, defaultdict
 from datetime import timedelta
 from decimal import Decimal
 
 from django.db.models import Count, Q, Sum
-from django.db.models.functions import TruncMonth
 from django.utils import timezone
 
 from apps.accounts.models import User
@@ -19,39 +19,46 @@ from .coverage_stats import build_hotspots_by_region, build_layer_inventory
 ADMIN_HOTSPOT_FEATURE_CAP = 12_000
 
 
+def _month_key(dt) -> str | None:
+    """Bucket a datetime into YYYY-MM without DB-side TruncMonth (MySQL tz-safe)."""
+    if not dt:
+        return None
+    try:
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone.utc)
+        local = timezone.localtime(dt)
+        return local.strftime("%Y-%m")
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
 def _monthly_trend(qs, date_field, months=6):
     cutoff = timezone.now() - timedelta(days=months * 31)
-    rows = (
-        qs.filter(**{f"{date_field}__gte": cutoff})
-        .annotate(month=TruncMonth(date_field))
-        .values("month")
-        .annotate(count=Count("id"))
-        .order_by("month")
-    )
-    return [
-        {"month": row["month"].strftime("%Y-%m"), "count": row["count"]}
-        for row in rows
-        if row["month"]
-    ]
+    counts: Counter[str] = Counter()
+    for dt in qs.filter(**{f"{date_field}__gte": cutoff}).values_list(date_field, flat=True).iterator(
+        chunk_size=2000
+    ):
+        month = _month_key(dt)
+        if month:
+            counts[month] += 1
+    return [{"month": month, "count": counts[month]} for month in sorted(counts)]
 
 
 def _revenue_trend(months=6):
     cutoff = timezone.now() - timedelta(days=months * 31)
-    rows = (
+    totals: defaultdict[str, float] = defaultdict(float)
+    for created_at, amount in (
         PaymentOrder.objects.filter(
             status=PaymentOrder.Status.COMPLETED,
             created_at__gte=cutoff,
         )
-        .annotate(month=TruncMonth("created_at"))
-        .values("month")
-        .annotate(total=Sum("amount"))
-        .order_by("month")
-    )
-    return [
-        {"month": row["month"].strftime("%Y-%m"), "total": float(row["total"] or 0)}
-        for row in rows
-        if row["month"]
-    ]
+        .values_list("created_at", "amount")
+        .iterator(chunk_size=2000)
+    ):
+        month = _month_key(created_at)
+        if month:
+            totals[month] += float(amount or 0)
+    return [{"month": month, "total": totals[month]} for month in sorted(totals)]
 
 
 def build_admin_platform_analytics():
@@ -66,15 +73,16 @@ def build_admin_platform_analytics():
     )
     new_users_30d = users_qs.filter(created_at__gte=thirty_days_ago).count()
     signup_trend = _monthly_trend(users_qs, "created_at")
-    recent_users = [
-        {
-            **row,
-            "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
-        }
-        for row in users_qs.order_by("-created_at")[:8].values(
-            "username", "email", "role", "created_at", "organization"
-        )
-    ]
+    recent_users = []
+    for row in users_qs.order_by("-created_at")[:8].values(
+        "username", "email", "role", "created_at", "organization"
+    ):
+        created_at = row.get("created_at")
+        try:
+            created_iso = created_at.isoformat() if created_at else None
+        except (ValueError, TypeError):
+            created_iso = None
+        recent_users.append({**row, "created_at": created_iso})
 
     free_count = users_qs.filter(role=User.Role.FREE).count()
     subscriber_count = users_qs.filter(role=User.Role.SUBSCRIBER).count()
