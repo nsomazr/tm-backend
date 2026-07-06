@@ -90,7 +90,7 @@ class Command(BaseCommand):
             )
 
         if dry_run:
-            self.stdout.write(self.style.WARNING("Dry run — no changes made."))
+            self.stdout.write(self.style.WARNING("Dry run: no changes made."))
             return
 
         layer_ids = [layer.id for layer in layers]

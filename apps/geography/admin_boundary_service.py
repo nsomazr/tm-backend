@@ -271,7 +271,7 @@ def _extract_name_code(props: dict[str, Any], level: int) -> tuple[str, str]:
         composite = _composite_code(props, "Region_Cod", "District_C")
         region_key = _region_key_from_props(props)
         district_part = str(props.get("District_C") or props.get("HASC_2") or "").strip()
-        # Prefer region+district composite — GID_2 alone often repeats per region (≈10 values in TZ).
+        # Prefer region+district composite: GID_2 alone often repeats per region (~10 values in TZ).
         if composite:
             code = composite
         elif region_key and district_part:

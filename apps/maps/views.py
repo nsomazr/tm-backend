@@ -319,11 +319,30 @@ class MapLayerViewSet(viewsets.ModelViewSet):
     def reorder(self, request):
         serializer = LayerReorderSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        layer_ids = serializer.validated_data["layer_ids"]
-        layers = list(MapLayer.objects.filter(id__in=layer_ids))
-        if len(layers) != len(layer_ids):
-            return Response({"detail": "One or more layers were not found."}, status=status.HTTP_400_BAD_REQUEST)
-        for layer in layers:
+        raw_ids = serializer.validated_data["layer_ids"]
+        layer_ids: list[int] = []
+        seen: set[int] = set()
+        for layer_id in raw_ids:
+            if layer_id in seen:
+                continue
+            seen.add(layer_id)
+            layer_ids.append(layer_id)
+
+        if not layer_ids:
+            return Response({"detail": "layer_ids must contain at least one layer id."}, status=status.HTTP_400_BAD_REQUEST)
+
+        layers_by_id = {
+            layer.id: layer
+            for layer in MapLayer.objects.filter(id__in=layer_ids)
+        }
+        missing = [layer_id for layer_id in layer_ids if layer_id not in layers_by_id]
+        if missing:
+            return Response(
+                {"detail": f"One or more layers were not found: {missing}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        for layer_id in layer_ids:
+            layer = layers_by_id[layer_id]
             if not user_can_manage_mineral(request.user, layer.mineral_id):
                 return Response({"detail": "Not allowed to reorder one or more layers."}, status=status.HTTP_403_FORBIDDEN)
         with transaction.atomic():

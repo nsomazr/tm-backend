@@ -25,7 +25,7 @@ class Command(BaseCommand):
         monthly.includes_chat_history = True
         monthly.max_explorable_minerals = 10
         monthly.description = (
-            "More access to advanced Terra insights — 10 mineral deep-explores per month"
+            "More access to advanced Terra insights: 10 mineral deep-explores per month"
         )
         monthly.name = "Plus"
         monthly.price = 100000
@@ -87,7 +87,7 @@ class Command(BaseCommand):
             },
         )
         starter.name = "Starter"
-        starter.description = "Keep exploring — 5 mineral deep-explores per month"
+        starter.description = "Keep exploring: 5 mineral deep-explores per month"
         starter.max_explorable_minerals = 5
         starter.included_assistant_credits = 1500
         starter.included_report_downloads = 1
