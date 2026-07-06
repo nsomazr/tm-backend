@@ -161,6 +161,18 @@ def simplify_geometry(geometry: dict[str, Any], tolerance_deg: float = 0.015) ->
     return geometry
 
 
+def _region_key_from_props(props: dict[str, Any]) -> str:
+    props = props or {}
+    for key in ("Region_Cod", "GID_1", "HASC_1", "Region_Nam", "NAME_1", "REGION", "region"):
+        val = props.get(key)
+        if val is None:
+            continue
+        text = str(val).strip()
+        if text:
+            return text
+    return ""
+
+
 def _extract_name_code(props: dict[str, Any], level: int) -> tuple[str, str]:
     props = props or {}
     if level == 0:
@@ -193,14 +205,21 @@ def _extract_name_code(props: dict[str, Any], level: int) -> tuple[str, str]:
         )
         name = str(name).strip()
         composite = _composite_code(props, "Region_Cod", "District_C")
-        if props.get("GID_2"):
-            code = str(props["GID_2"]).strip()
+        region_key = _region_key_from_props(props)
+        district_part = str(props.get("District_C") or props.get("HASC_2") or "").strip()
+        # Prefer region+district composite — GID_2 alone often repeats per region (≈10 values in TZ).
+        if composite:
+            code = composite
+        elif region_key and district_part:
+            code = f"{region_key}-{district_part}"
+        elif props.get("GID_2"):
+            gid2 = str(props["GID_2"]).strip()
+            code = f"{region_key}-{gid2}" if region_key else gid2
         elif props.get("HASC_2"):
             code = str(props["HASC_2"]).strip()
-        elif composite:
-            code = composite
+        elif region_key:
+            code = f"{_slug_code(region_key)}-{_slug_code(name)}"
         else:
-            # District_C is only unique within a region, not nationally.
             code = _slug_code(name)
     elif level == 3:
         name = (
@@ -212,12 +231,22 @@ def _extract_name_code(props: dict[str, Any], level: int) -> tuple[str, str]:
             or props.get("name")
             or "Ward"
         )
-        code = (
-            props.get("GID_3")
-            or props.get("HASC_3")
-            or _composite_code(props, "Region_Cod", "District_C", "Ward_Code")
-            or _slug_code(name)
-        )
+        name = str(name).strip()
+        composite = _composite_code(props, "Region_Cod", "District_C", "Ward_Code")
+        if composite:
+            code = composite
+        elif props.get("GID_3"):
+            gid3 = str(props["GID_3"]).strip()
+            region_key = _region_key_from_props(props)
+            district_part = str(props.get("District_C") or props.get("NAME_2") or "").strip()
+            if region_key and district_part:
+                code = f"{region_key}-{district_part}-{gid3}"
+            else:
+                code = gid3
+        elif props.get("HASC_3"):
+            code = str(props["HASC_3"]).strip()
+        else:
+            code = _slug_code(name)
     else:
         name = (
             props.get("NAME_4")
@@ -535,7 +564,8 @@ def import_features_for_country(
                     country.bounds = candidate
             country.save(update_fields=["boundary", "bounds"])
 
-    return count
+    saved = AdminBoundary.objects.filter(country=country, level=level, source=source).count()
+    return saved
 
 
 def import_geojson_file(

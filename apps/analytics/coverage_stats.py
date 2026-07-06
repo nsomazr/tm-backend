@@ -37,12 +37,80 @@ def _feature_polygon_area_km2(feature: MapFeature) -> float:
     return geometry_area_km2(feature.geometry)
 
 
+def _aggregate_mineral_hotspots(layer_hotspots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per commodity mineral (sum polygon/point/line layers for the same mineral)."""
+    merged: dict[str, dict[str, Any]] = {}
+    for row in layer_hotspots:
+        mineral_slug = row.get("mineral_slug") or row["slug"]
+        mineral_name = row.get("mineral_name") or row["name"]
+        if mineral_slug not in merged:
+            merged[mineral_slug] = {
+                "slug": mineral_slug,
+                "name": mineral_name,
+                "name_sw": row.get("mineral_name_sw") or row.get("name_sw") or mineral_name,
+                "color": row["color"],
+                "feature_count": 0,
+                "layer_type": "mineral",
+                "hotspots": {},
+            }
+            if row.get("area_km2"):
+                merged[mineral_slug]["area_km2"] = 0.0
+
+        entry = merged[mineral_slug]
+        entry["feature_count"] += row["feature_count"]
+        if row.get("area_km2"):
+            entry["area_km2"] = entry.get("area_km2", 0.0) + row["area_km2"]
+
+        region_map: dict[str, dict[str, Any]] = entry["hotspots"]
+        for region_row in row.get("hotspots") or []:
+            region = region_row["region"]
+            if region not in region_map:
+                region_map[region] = {
+                    "region": region,
+                    "feature_count": 0,
+                }
+            region_map[region]["feature_count"] += region_row["feature_count"]
+            if region_row.get("area_km2"):
+                region_map[region]["area_km2"] = (
+                    region_map[region].get("area_km2", 0.0) + region_row["area_km2"]
+                )
+
+    mineral_hotspots = []
+    for entry in merged.values():
+        hotspots = sorted(
+            [
+                {
+                    **row,
+                    **({"area_km2": round(row["area_km2"], 2)} if row.get("area_km2") else {}),
+                }
+                for row in entry["hotspots"].values()
+            ],
+            key=lambda row: row["feature_count"],
+            reverse=True,
+        )[:10]
+        payload = {
+            "slug": entry["slug"],
+            "name": entry["name"],
+            "name_sw": entry["name_sw"],
+            "color": entry["color"],
+            "feature_count": entry["feature_count"],
+            "layer_type": entry["layer_type"],
+            "hotspots": hotspots,
+        }
+        if entry.get("area_km2"):
+            payload["area_km2"] = round(entry["area_km2"], 2)
+        mineral_hotspots.append(payload)
+
+    mineral_hotspots.sort(key=lambda row: row["feature_count"], reverse=True)
+    return mineral_hotspots
+
+
 def build_feature_coverage_stats(
     features_qs,
     *,
     country_code: str = "TZ",
     locale: str = "en",
-    max_features: int = 10000,
+    max_features: int | None = None,
 ) -> dict[str, Any]:
     region_index = _AdminRegionIndex(country_code)
     region_counts: defaultdict[str, int] = defaultdict(int)
@@ -58,8 +126,14 @@ def build_feature_coverage_stats(
     mineral_areas: defaultdict[str, float] = defaultdict(float)
     total_area_km2 = 0.0
 
-    for feature in features_qs.select_related("layer", "layer__mineral", "layer__region")[:max_features]:
+    total_prospects = features_qs.count()
+    feature_stream = features_qs.select_related("layer", "layer__mineral", "layer__region")
+    if max_features is not None:
+        feature_stream = feature_stream[:max_features]
+
+    for feature in feature_stream.iterator(chunk_size=2000):
         layer = feature.layer
+        mineral = layer.mineral
         layer_counts[layer.id] += 1
         feature_area = _feature_polygon_area_km2(feature)
         if feature_area > 0:
@@ -73,9 +147,11 @@ def build_feature_coverage_stats(
                 "name_sw": layer.name_sw,
                 "layer_type": layer.layer_type,
                 "color": _layer_color(layer),
+                "mineral_slug": mineral.slug,
+                "mineral_name": localized_name(mineral, locale),
+                "mineral_name_sw": mineral.name_sw,
             }
 
-        mineral = layer.mineral
         mineral_counts[mineral.slug]["count"] += 1
         mineral_counts[mineral.slug]["name"] = localized_name(mineral, locale)
         mineral_counts[mineral.slug]["name_sw"] = mineral.name_sw
@@ -147,6 +223,7 @@ def build_feature_coverage_stats(
             }
         )
     layer_hotspots.sort(key=lambda row: row["feature_count"], reverse=True)
+    mineral_hotspots = _aggregate_mineral_hotspots(layer_hotspots)
 
     minerals = [
         {
@@ -160,9 +237,10 @@ def build_feature_coverage_stats(
     payload: dict[str, Any] = {
         "hotspots": hotspots,
         "layer_hotspots": layer_hotspots,
+        "mineral_hotspots": mineral_hotspots,
         "layers": layers,
         "minerals": minerals,
-        "total_prospects": sum(layer_counts.values()),
+        "total_prospects": total_prospects,
     }
     if total_area_km2 > 0:
         payload["total_area_km2"] = round(total_area_km2, 2)
@@ -197,7 +275,7 @@ def build_hotspots_by_region(
     *,
     country_code: str = "TZ",
     limit: int = 10,
-    max_features: int = 10000,
+    max_features: int | None = None,
 ) -> list[dict[str, Any]]:
     stats = build_feature_coverage_stats(
         features_qs,

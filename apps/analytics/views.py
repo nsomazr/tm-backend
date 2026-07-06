@@ -94,6 +94,7 @@ class HotspotAnalyticsView(APIView):
         return Response({
             "hotspots": coverage["hotspots"],
             "layer_hotspots": coverage["layer_hotspots"],
+            "mineral_hotspots": coverage["mineral_hotspots"],
             "layers": coverage["layers"],
             "minerals": coverage["minerals"],
             "total_prospects": coverage["total_prospects"],
@@ -188,9 +189,10 @@ class MineralHeatmapView(PublicCatalogThrottleMixin, APIView):
 
     def get(self, request, slug: str):
         from .mineral_heatmap import build_mineral_heatmap
+        from .mineral_exploration import get_mineral_exploration_quota, user_can_view_mineral_heatmap
 
         quota = get_mineral_exploration_quota(request, request.user)
-        if not can_explore_mineral(quota, slug):
+        if not user_can_view_mineral_heatmap(request.user, quota, slug):
             return Response(
                 {
                     "detail": "Mineral exploration limit reached for your plan.",

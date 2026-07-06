@@ -128,6 +128,19 @@ def can_explore_mineral(quota: dict, slug: str) -> bool:
     return remaining > 0
 
 
+def user_can_view_mineral_heatmap(user, quota: dict, slug: str) -> bool:
+    """Paid map access includes heatmap overlay; free tier uses explore quota."""
+    slug = (slug or "").strip()
+    if not slug:
+        return False
+    if user and getattr(user, "is_authenticated", False):
+        if getattr(user, "is_admin_user", False) or getattr(user, "has_paid_access", False):
+            return True
+        if getattr(user, "role", None) == User.Role.MINERAL_MANAGER:
+            return True
+    return can_explore_mineral(quota, slug)
+
+
 def record_mineral_exploration(user, slug: str) -> None:
     from .models import MineralExplorationLog
 
