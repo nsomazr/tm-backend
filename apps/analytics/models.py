@@ -3,12 +3,16 @@ from django.db import models
 
 
 class AssistantCreditUsage(models.Model):
-    """Tracks Ask Terra AI credit consumption (map insights + chat)."""
+    """Tracks Ask Terra credit consumption (map insights + chat)."""
 
     class Kind(models.TextChoices):
         MAP_INSIGHT = "map_insight", "Map insight"
         CHAT = "chat", "Chat message"
         REPORT_EXPORT = "report_export", "Insight report export"
+        REPORT_CHAT = "report_chat", "Report PDF chat"
+        EXPLORATION_GENERATE = "exploration_generate", "Exploration report generate"
+        EXPLORATION_REFINE = "exploration_refine", "Exploration report refine"
+        EXPLORATION_EXPORT = "exploration_export", "Exploration report export"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,

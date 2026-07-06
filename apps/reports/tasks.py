@@ -45,6 +45,17 @@ def generate_report_summary(report_id):
 
         ensure_report_pdf(report)
 
+    from .article_service import sync_report_article_body
+
+    sync_report_article_body(report, force=True)
+
+
+@shared_task
+def index_report_pdf(report_id: int) -> int:
+    from .rag_service import index_report_pdf as _index
+
+    return _index(report_id)
+
 
 def _extract_findings(summary_text: str) -> list[str]:
     for marker in ("Key findings:", "key findings:", "KEY FINDINGS:"):
@@ -61,11 +72,11 @@ def _extract_findings(summary_text: str) -> list[str]:
                     findings.append(stripped.lstrip("- •").strip())
                 elif findings:
                     break
-            return [f for f in findings if f][:8]
+            return [f for f in findings if f][:12]
 
     lines = [
         line.strip("- •")
         for line in summary_text.split("\n")
         if line.strip().startswith(("-", "•"))
     ]
-    return [line for line in lines if line][:8]
+    return [line for line in lines if line][:12]

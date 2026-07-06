@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import io
+import re
+from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 
 from django.conf import settings
@@ -16,6 +19,8 @@ from reportlab.lib.units import inch
 from reportlab.platypus import ListFlowable, ListItem, Paragraph, SimpleDocTemplate, Spacer
 
 from .models import Report
+
+KEY_FINDINGS_HEADING = "key findings"
 
 
 def _brand_logo_path() -> Path | None:
@@ -43,14 +48,275 @@ def _wordmark_path() -> Path | None:
     return None
 
 
+def _html_to_report_text(text: str) -> str:
+    if not text:
+        return ""
+    if "<" not in text:
+        return text
+    cleaned = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    cleaned = re.sub(r"</h[1-6]>", "\n\n", cleaned, flags=re.I)
+    cleaned = re.sub(r"</p>", "\n\n", cleaned, flags=re.I)
+    cleaned = re.sub(r"</li>", "\n", cleaned, flags=re.I)
+    cleaned = re.sub(r"<[^>]+>", "", cleaned)
+    cleaned = unescape(cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _escape_xml(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _normalize_color(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return "#334155"
+    if value.startswith("#"):
+        return value[:7]
+    rgb = re.match(r"rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", value, re.I)
+    if rgb:
+        r, g, b = (max(0, min(255, int(part))) for part in rgb.groups())
+        return f"#{r:02x}{g:02x}{b:02x}"
+    return value
+
+
+def _color_from_style(style: str) -> str | None:
+    match = re.search(r"color:\s*([^;]+)", style, re.I)
+    if not match:
+        return None
+    return _normalize_color(match.group(1))
+
+
+def _open_inline_tag(tag: str, attrs: list[tuple[str, str | None]]) -> str:
+    tag = tag.lower()
+    attr_map = {key.lower(): value for key, value in attrs}
+    if tag in ("b", "strong"):
+        return "<b>"
+    if tag in ("i", "em"):
+        return "<i>"
+    if tag == "u":
+        return "<u>"
+    if tag == "br":
+        return "<br/>"
+    if tag == "font":
+        color = attr_map.get("color")
+        if color:
+            return f'<font color="{_normalize_color(color)}">'
+        return "<font>"
+    if tag == "span":
+        color = _color_from_style(attr_map.get("style") or "")
+        if color:
+            return f'<font color="{color}">'
+    return ""
+
+
+def _close_inline_tag(tag: str) -> str:
+    tag = tag.lower()
+    if tag in ("b", "strong"):
+        return "</b>"
+    if tag in ("i", "em"):
+        return "</i>"
+    if tag == "u":
+        return "</u>"
+    if tag in ("font", "span"):
+        return "</font>"
+    return ""
+
+
+class _ReportPdfHtmlParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.blocks: list[dict] = []
+        self._mode: str | None = None
+        self._buffer: list[str] = []
+        self._list_items: list[str] = []
+        self._in_li = False
+        self._li_buffer: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in ("h2", "h3"):
+            self._flush()
+            self._mode = tag
+            self._buffer = []
+            return
+        if tag == "p":
+            self._flush()
+            self._mode = "p"
+            self._buffer = []
+            return
+        if tag in ("ul", "ol"):
+            self._flush()
+            self._mode = "list"
+            self._list_items = []
+            return
+        if tag == "li":
+            self._in_li = True
+            self._li_buffer = []
+            return
+        markup = _open_inline_tag(tag, attrs)
+        if not markup:
+            return
+        if self._in_li:
+            self._li_buffer.append(markup)
+        elif self._mode in ("p", "h2", "h3"):
+            self._buffer.append(markup)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in ("h2", "h3"):
+            text = "".join(self._buffer).strip()
+            if text:
+                self.blocks.append({"type": "heading", "level": 2 if tag == "h2" else 3, "text": text})
+            self._mode = None
+            self._buffer = []
+            return
+        if tag == "p":
+            markup = "".join(self._buffer).strip()
+            if markup:
+                self.blocks.append({"type": "paragraph", "markup": markup})
+            self._mode = None
+            self._buffer = []
+            return
+        if tag == "li":
+            item = "".join(self._li_buffer).strip()
+            if item:
+                self._list_items.append(item)
+            self._in_li = False
+            self._li_buffer = []
+            return
+        if tag in ("ul", "ol"):
+            if self._list_items:
+                self.blocks.append({"type": "list", "items": self._list_items})
+            self._mode = None
+            self._list_items = []
+            return
+        markup = _close_inline_tag(tag)
+        if not markup:
+            return
+        if self._in_li:
+            self._li_buffer.append(markup)
+        elif self._mode in ("p", "h2", "h3"):
+            self._buffer.append(markup)
+
+    def handle_data(self, data):
+        if not data:
+            return
+        escaped = _escape_xml(data)
+        if self._in_li:
+            self._li_buffer.append(escaped)
+        elif self._mode in ("p", "h2", "h3"):
+            self._buffer.append(escaped)
+
+    def _flush(self):
+        if self._mode == "p":
+            markup = "".join(self._buffer).strip()
+            if markup:
+                self.blocks.append({"type": "paragraph", "markup": markup})
+        elif self._mode in ("h2", "h3"):
+            text = "".join(self._buffer).strip()
+            if text:
+                level = 2 if self._mode == "h2" else 3
+                self.blocks.append({"type": "heading", "level": level, "text": text})
+        elif self._mode == "list" and self._list_items:
+            self.blocks.append({"type": "list", "items": self._list_items})
+        self._mode = None
+        self._buffer = []
+        self._list_items = []
+        self._in_li = False
+        self._li_buffer = []
+
+    def close(self):
+        super().close()
+        self._flush()
+
+
+def _parse_plain_summary_blocks(text: str) -> list[dict]:
+    blocks: list[dict] = []
+    for paragraph in [part.strip() for part in text.split("\n\n") if part.strip()]:
+        if paragraph.lower() == KEY_FINDINGS_HEADING:
+            blocks.append({"type": "heading", "level": 2, "text": paragraph})
+            continue
+        if len(paragraph) < 80 and paragraph == paragraph.title() and " " in paragraph:
+            blocks.append({"type": "heading", "level": 2, "text": paragraph})
+            continue
+        blocks.append({"type": "paragraph", "markup": _escape_xml(paragraph)})
+    return blocks
+
+
+def _parse_summary_html_blocks(summary: str) -> list[dict]:
+    if not summary or not summary.strip():
+        return []
+    if "<" not in summary:
+        return _parse_plain_summary_blocks(summary)
+    parser = _ReportPdfHtmlParser()
+    parser.feed(summary)
+    parser.close()
+    return parser.blocks
+
+
+def _split_body_and_findings(blocks: list[dict]) -> tuple[list[dict], list[str]]:
+    body: list[dict] = []
+    findings: list[str] = []
+    in_findings = False
+
+    for block in blocks:
+        if block.get("type") == "heading" and str(block.get("text", "")).strip().lower() == KEY_FINDINGS_HEADING:
+            in_findings = True
+            continue
+        if in_findings:
+            if block.get("type") == "list":
+                findings.extend(str(item).strip() for item in block.get("items", []) if str(item).strip())
+            elif block.get("type") == "paragraph":
+                plain = _html_to_report_text(str(block.get("markup", "")))
+                if plain:
+                    findings.append(plain)
+            continue
+        body.append(block)
+
+    return body, findings
+
+
 def _wrap_text(text: str, style: ParagraphStyle) -> Paragraph:
-    safe = (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace("\n", "<br/>")
-    )
+    safe = _escape_xml(text).replace("\n", "<br/>")
     return Paragraph(safe, style)
+
+
+def _paragraph_markup(markup: str, style: ParagraphStyle) -> Paragraph:
+    return Paragraph(markup, style)
+
+
+def _append_summary_blocks(
+    story: list,
+    blocks: list[dict],
+    *,
+    section_style: ParagraphStyle,
+    subsection_style: ParagraphStyle,
+    body_style: ParagraphStyle,
+    bullet_style: ParagraphStyle,
+) -> None:
+    for block in blocks:
+        block_type = block.get("type")
+        if block_type == "heading":
+            text = str(block.get("text", "")).strip()
+            if not text:
+                continue
+            style = section_style if block.get("level", 2) <= 2 else subsection_style
+            story.append(_wrap_text(text, style))
+            continue
+        if block_type == "paragraph":
+            markup = str(block.get("markup", "")).strip()
+            if markup:
+                story.append(_paragraph_markup(markup, body_style))
+            continue
+        if block_type == "list":
+            items = [
+                ListItem(_paragraph_markup(str(item), bullet_style), leftIndent=12)
+                for item in block.get("items", [])
+                if str(item).strip()
+            ]
+            if items:
+                story.append(ListFlowable(items, bulletType="bullet", start="•"))
 
 
 def build_report_pdf_bytes(report: Report) -> bytes:
@@ -98,6 +364,15 @@ def build_report_pdf_bytes(report: Report) -> bytes:
         spaceBefore=16,
         spaceAfter=8,
     )
+    subsection_style = ParagraphStyle(
+        "SubsectionHeading",
+        parent=section_style,
+        fontSize=11.5,
+        leading=14,
+        textColor=colors.HexColor("#15803d"),
+        spaceBefore=12,
+        spaceAfter=6,
+    )
     body_style = ParagraphStyle(
         "ReportBody",
         parent=styles["BodyText"],
@@ -142,32 +417,47 @@ def build_report_pdf_bytes(report: Report) -> bytes:
         story.append(_wrap_text("Overview", section_style))
         story.append(_wrap_text(report.description, body_style))
 
-    summary_text = summary_obj.summary if summary_obj else ""
-    summary_body = summary_text
-    if summary_text:
-        for marker in ("Key findings:", "key findings:", "KEY FINDINGS:"):
-            if marker in summary_text:
-                summary_body = summary_text.split(marker, 1)[0].strip()
-                break
+    summary_html = summary_obj.summary if summary_obj else ""
+    summary_blocks = _parse_summary_html_blocks(summary_html)
+    body_blocks, embedded_findings = _split_body_and_findings(summary_blocks)
 
-    if summary_body:
-        story.append(_wrap_text("Executive summary", section_style))
-        for paragraph in summary_body.split("\n\n"):
-            chunk = paragraph.strip()
-            if chunk:
-                story.append(_wrap_text(chunk, body_style))
+    if body_blocks:
+        _append_summary_blocks(
+            story,
+            body_blocks,
+            section_style=section_style,
+            subsection_style=subsection_style,
+            body_style=body_style,
+            bullet_style=bullet_style,
+        )
+    elif summary_html:
+        plain = _html_to_report_text(summary_html)
+        if plain:
+            story.append(_wrap_text("Executive summary", section_style))
+            for paragraph in plain.split("\n\n"):
+                chunk = paragraph.strip()
+                if chunk:
+                    story.append(_wrap_text(chunk, body_style))
 
-    findings = summary_obj.key_findings if summary_obj and summary_obj.key_findings else []
-    if not findings and summary_text:
-        findings = [line.strip("- •") for line in summary_text.split("\n") if line.strip().startswith(("-", "•"))][:8]
+    findings = list(summary_obj.key_findings if summary_obj and summary_obj.key_findings else [])
+    if embedded_findings:
+        findings = embedded_findings
+    elif not findings and summary_html:
+        plain = _html_to_report_text(summary_html)
+        findings = [line.strip("- •") for line in plain.split("\n") if line.strip().startswith(("-", "•"))][:12]
 
     if findings:
         story.append(_wrap_text("Key findings", section_style))
-        items = [
-            ListItem(_wrap_text(str(finding), bullet_style), leftIndent=12)
-            for finding in findings
-            if str(finding).strip()
-        ]
+        items = []
+        for finding in findings:
+            text = str(finding).strip()
+            if not text:
+                continue
+            if "<" in text:
+                para = _paragraph_markup(text, bullet_style)
+            else:
+                para = _wrap_text(text, bullet_style)
+            items.append(ListItem(para, leftIndent=12))
         if items:
             story.append(ListFlowable(items, bulletType="bullet", start="•"))
 

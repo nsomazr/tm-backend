@@ -25,7 +25,7 @@ class SubscriptionPlan(models.Model):
     )
     included_assistant_credits = models.PositiveIntegerField(
         default=0,
-        help_text="Ask Terra AI credits included per calendar month (e.g. 3000 monthly plan, 5000 annual plan).",
+        help_text="Ask Terra credits included per calendar month (e.g. 3000 monthly plan, 5000 annual plan).",
     )
     includes_chat_history = models.BooleanField(
         default=False,

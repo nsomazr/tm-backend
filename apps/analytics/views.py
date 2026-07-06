@@ -318,7 +318,7 @@ class SearchContextInsightsView(PublicCatalogThrottleMixin, APIView):
             except InsufficientAssistantCredits as exc:
                 payload["assistant_credits"] = exc.quota
                 payload["requires_subscription"] = exc.quota.get("tier") in ("free", "anonymous")
-                payload["upgrade_message"] = "No Ask Terra credits remaining. Upgrade for more AI credits."
+                payload["upgrade_message"] = "No Ask Terra credits remaining. Upgrade for more credits."
                 payload["ai_insight"] = generate_basic_search_insight(ctx, locale=locale)
                 payload["insight_tier"] = "basic"
                 return Response(payload)
@@ -332,7 +332,7 @@ class SearchContextInsightsView(PublicCatalogThrottleMixin, APIView):
         elif ctx["has_mapped_data"]:
             payload["requires_subscription"] = True
             payload["upgrade_message"] = (
-                "Subscribe for deeper AI insights, full analytics, and report downloads."
+                "Subscribe for deeper Terra insights, full analytics, and report downloads."
             )
             payload["ai_insight"] = generate_basic_search_insight(ctx, locale=locale)
             payload["insight_tier"] = "basic"
@@ -411,7 +411,7 @@ class AreaInsightsView(PublicCatalogThrottleMixin, APIView):
         if not has_detail:
             payload["requires_subscription"] = True
             payload["upgrade_message"] = (
-                "Subscribe to unlock location AI insights, analytics, and report downloads."
+                "Subscribe to unlock location Terra insights, analytics, and report downloads."
             )
             if not ctx["has_mapped_data"]:
                 payload["ai_insight"] = None
@@ -427,7 +427,7 @@ class AreaInsightsView(PublicCatalogThrottleMixin, APIView):
             except InsufficientAssistantCredits as exc:
                 payload["assistant_credits"] = exc.quota
                 payload["requires_subscription"] = exc.quota.get("tier") in ("free", "anonymous")
-                payload["upgrade_message"] = "No Ask Terra credits remaining. Upgrade for more AI credits."
+                payload["upgrade_message"] = "No Ask Terra credits remaining. Upgrade for more credits."
                 return Response(payload)
 
             ai_context = build_area_ai_context(ctx)
@@ -853,5 +853,43 @@ class AdminManagerPerformanceView(APIView):
             logger.exception("Failed to build manager performance review")
             return Response(
                 {"detail": "Could not build manager performance review. Check server logs for details."},
+                status=500,
+            )
+
+
+class AdminUserActivityAnalyticsView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        import logging
+
+        from .user_activity_stats import build_admin_user_activity_analytics
+
+        logger = logging.getLogger(__name__)
+        try:
+            return Response(build_admin_user_activity_analytics())
+        except Exception:
+            logger.exception("Failed to build user activity analytics")
+            return Response(
+                {"detail": "Could not build user activity analytics. Check server logs for details."},
+                status=500,
+            )
+
+
+class AdminMineralAnalyticsView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        import logging
+
+        from .mineral_analytics_stats import build_admin_mineral_analytics
+
+        logger = logging.getLogger(__name__)
+        try:
+            return Response(build_admin_mineral_analytics())
+        except Exception:
+            logger.exception("Failed to build mineral analytics")
+            return Response(
+                {"detail": "Could not build mineral analytics. Check server logs for details."},
                 status=500,
             )

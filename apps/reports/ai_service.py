@@ -1,7 +1,8 @@
-"""Multi-provider AI summary generation: Ollama, Groq, or Gemini."""
+"""Multi-provider intelligence summary generation: Ollama, Groq, or Gemini."""
 
 import json
 import logging
+import math
 import re
 
 import requests
@@ -11,11 +12,19 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You are a senior geological analyst for Terra Meta, a mineral intelligence platform. "
-    "Write a comprehensive but readable prospectivity report summary (4–6 short paragraphs) "
-    "covering geological setting, mineral potential, exploration implications, and regional context. "
-    "End with a 'Key findings:' section and 4–6 bullet points (each starting with '- '). "
-    "Use plain language suitable for investors and policymakers. Be specific to the data provided."
+    "Write a comprehensive prospectivity report of 1,200–2,000 words (approximately 3–5 PDF pages). "
+    "Structure with clear section headings: Executive Summary; Regional Geological Setting; "
+    "Mineral Potential and Deposit Types; Exploration History and Opportunities; "
+    "Infrastructure, Access, and Jurisdiction; Risk Factors and Data Limitations; "
+    "Recommendations and Next Steps. Each section needs 2–4 substantive paragraphs. "
+    "End with a 'Key findings:' section and 8–12 bullet points (each starting with '- '). "
+    "Use plain language suitable for investors and policymakers. Be specific to the data provided. "
+    "Never produce a brief one-paragraph summary."
 )
+
+REPORT_MIN_WORDS = 1200
+REPORT_MAX_WORDS = 2000
+REPORT_WRITING_MAX_TOKENS = 5000
 
 MAP_INSIGHT_PROMPT = (
     "You are Terra Assistant for Terra Meta, a mineral intelligence platform. "
@@ -53,12 +62,24 @@ PLATFORM_ASSISTANT_CHAT_PROMPT = (
 
 REPORT_WRITING_PROMPT = (
     "You are Terra Meta's report writing assistant for mineral prospectivity reports. "
-    "Draft publication-ready content using ONLY the report metadata and reference context provided. "
+    f"Draft a comprehensive, publication-ready report of {REPORT_MIN_WORDS}–{REPORT_MAX_WORDS} words "
+    "(approximately 3–5 PDF pages). Use ONLY the report metadata and reference context provided. "
     "Write for investors, explorers, and policymakers. Be specific to the country and commodity named. "
+    "Structure executive_summary with these section headings on their own lines, in order:\n"
+    "Executive Summary\n"
+    "Regional Geological Setting\n"
+    "Mineral Potential and Deposit Types\n"
+    "Exploration History and Opportunities\n"
+    "Infrastructure, Access, and Jurisdiction\n"
+    "Risk Factors and Data Limitations\n"
+    "Recommendations and Next Steps\n"
+    "Each section must have 2–4 substantive paragraphs separated by blank lines. Do not skip sections. "
+    "If context is thin, still write the full structure with cautious, clearly scoped narrative "
+    "and explicit data-limitation notes — never produce a one-paragraph summary. "
     "Do not invent drill results, reserves, or licenses not supported by the context. "
-    "If context is thin, write cautious, clearly scoped geological narrative and note data limitations. "
     "Respond with valid JSON only (no markdown code fences). Schema:\n"
-    '{"executive_summary":"4-6 short paragraphs as one string","key_findings":["4-6 concise bullets"],'
+    '{"executive_summary":"full report text with section headings",'
+    '"key_findings":["8-12 concise bullet findings"],'
     '"assistant_reply":"1-2 sentences explaining what you drafted or changed"}'
 )
 
@@ -98,7 +119,7 @@ def generate_map_insight(context: str) -> tuple[str, str]:
             if text and text.strip():
                 return sanitize_assistant_output(text.strip()), _model_label(provider)
         except Exception as exc:
-            logger.warning("AI map insight provider %s failed: %s", provider, exc)
+            logger.warning("Map insight provider %s failed: %s", provider, exc)
             errors.append(f"{provider}: {exc}")
 
     region_line = _fallback_region_line(context)
@@ -136,7 +157,7 @@ def generate_assistant_chat(
             if text and text.strip():
                 return sanitize_assistant_output(text.strip()), _model_label(provider)
         except Exception as exc:
-            logger.warning("AI assistant chat provider %s failed: %s", provider, exc)
+            logger.warning("Assistant chat provider %s failed: %s", provider, exc)
             errors.append(f"{provider}: {exc}")
 
     if errors:
@@ -145,7 +166,7 @@ def generate_assistant_chat(
             "fallback",
         )
     return (
-        "Intelligence service is not configured. Add an AI provider in server settings.",
+        "Intelligence service is not configured. Add an intelligence provider in server settings.",
         "fallback",
     )
 
@@ -169,7 +190,15 @@ def generate_report_writing_assist(
     user_payload = _build_report_writing_user_payload(metadata, context_text, current_draft)
     chat_messages = list(messages or [])
     if not chat_messages:
-        chat_messages = [{"role": "user", "content": "Draft the full report from the metadata and reference context."}]
+        chat_messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Draft the full 3–5 page report (all sections, 1,200–2,000 words) "
+                    "from the metadata and reference context."
+                ),
+            }
+        ]
 
     for provider in providers:
         try:
@@ -178,7 +207,7 @@ def generate_report_writing_assist(
             if parsed.get("executive_summary"):
                 return parsed, _model_label(provider)
         except Exception as exc:
-            logger.warning("AI report writing provider %s failed: %s", provider, exc)
+            logger.warning("Report writing provider %s failed: %s", provider, exc)
             errors.append(f"{provider}: {exc}")
 
     fallback_summary, model = generate_summary(user_payload)
@@ -234,8 +263,10 @@ def _call_report_writing_provider(
     provider: str,
     user_payload: str,
     messages: list[dict[str, str]],
+    *,
+    system_prompt: str = REPORT_WRITING_PROMPT,
 ) -> str:
-    chat_messages = [{"role": "system", "content": REPORT_WRITING_PROMPT}]
+    chat_messages = [{"role": "system", "content": system_prompt}]
     chat_messages.append({"role": "system", "content": user_payload})
     for item in messages:
         role = item.get("role")
@@ -244,12 +275,61 @@ def _call_report_writing_provider(
             chat_messages.append({"role": role, "content": content})
 
     if provider == "ollama":
-        return _ollama_messages(chat_messages, max_tokens=2200)
+        return _ollama_messages(chat_messages, max_tokens=REPORT_WRITING_MAX_TOKENS)
     if provider == "groq":
-        return _groq_messages(chat_messages, max_tokens=2200)
+        return _groq_messages(chat_messages, max_tokens=REPORT_WRITING_MAX_TOKENS)
     if provider == "gemini":
-        return _gemini_messages(chat_messages, max_tokens=2200)
-    raise ValueError(f"Unknown AI provider: {provider}")
+        return _gemini_messages(chat_messages, max_tokens=REPORT_WRITING_MAX_TOKENS)
+    raise ValueError(f"Unknown intelligence provider: {provider}")
+
+
+def _repair_truncated_report_json(text: str) -> dict | None:
+    """Best-effort extraction when the model returns truncated or malformed JSON."""
+    summary_match = re.search(
+        r'"executive_summary"\s*:\s*"((?:[^"\\]|\\.)*)"',
+        text,
+        re.DOTALL,
+    )
+    if not summary_match:
+        return None
+
+    try:
+        executive_summary = json.loads(f'"{summary_match.group(1)}"')
+    except json.JSONDecodeError:
+        executive_summary = (
+            summary_match.group(1)
+            .replace("\\n", "\n")
+            .replace('\\"', '"')
+            .replace("\\t", "\t")
+        )
+
+    findings: list[str] = []
+    findings_match = re.search(r'"key_findings"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+    if findings_match:
+        try:
+            parsed = json.loads(f"[{findings_match.group(1)}]")
+            if isinstance(parsed, list):
+                findings = [str(item).strip() for item in parsed if str(item).strip()]
+        except json.JSONDecodeError:
+            findings = re.findall(r'"((?:[^"\\]|\\.)*)"', findings_match.group(1))
+            findings = [f.replace("\\n", " ").strip() for f in findings if f.strip()]
+
+    reply_match = re.search(r'"assistant_reply"\s*:\s*"((?:[^"\\]|\\.)*)"', text, re.DOTALL)
+    assistant_reply = "Draft ready for your review."
+    if reply_match:
+        try:
+            assistant_reply = json.loads(f'"{reply_match.group(1)}"')
+        except json.JSONDecodeError:
+            assistant_reply = reply_match.group(1).replace("\\n", " ").strip() or assistant_reply
+
+    if not str(executive_summary).strip():
+        return None
+
+    return {
+        "executive_summary": str(executive_summary).strip(),
+        "key_findings": findings[:12],
+        "assistant_reply": assistant_reply,
+    }
 
 
 def _parse_report_writing_response(raw: str) -> dict:
@@ -258,30 +338,38 @@ def _parse_report_writing_response(raw: str) -> dict:
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
 
+    data = None
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        from .tasks import _extract_findings
+        data = _repair_truncated_report_json(text)
 
-        findings = _extract_findings(text)
-        body = text
-        for marker in ("Key findings:", "key findings:", "KEY FINDINGS:"):
-            if marker in body:
-                body = body.split(marker, 1)[0].strip()
-                break
-        return {
-            "executive_summary": body,
-            "key_findings": findings,
-            "assistant_reply": "Draft parsed from free-form model output.",
-        }
+    if data:
+        findings = data.get("key_findings") or []
+        if isinstance(findings, str):
+            findings = [line.strip() for line in findings.split("\n") if line.strip()]
+        executive_summary = str(data.get("executive_summary") or "").strip()
+        if executive_summary:
+            return {
+                "executive_summary": executive_summary,
+                "key_findings": [str(f).strip() for f in findings if str(f).strip()][:12],
+                "assistant_reply": str(data.get("assistant_reply") or "Draft ready for your review.").strip(),
+            }
 
-    findings = data.get("key_findings") or []
-    if isinstance(findings, str):
-        findings = [line.strip() for line in findings.split("\n") if line.strip()]
+    from .tasks import _extract_findings
+
+    findings = _extract_findings(text)
+    body = text
+    for marker in ("Key findings:", "key findings:", "KEY FINDINGS:"):
+        if marker in body:
+            body = body.split(marker, 1)[0].strip()
+            break
+    body = re.sub(r'"key_findings"\s*:\s*\[[\s\S]*$', "", body).strip()
+    body = re.sub(r'"assistant_reply"\s*:\s*"[\s\S]*$', "", body).strip()
     return {
-        "executive_summary": str(data.get("executive_summary") or "").strip(),
-        "key_findings": [str(f).strip() for f in findings if str(f).strip()][:8],
-        "assistant_reply": str(data.get("assistant_reply") or "Draft ready for your review.").strip(),
+        "executive_summary": body,
+        "key_findings": findings,
+        "assistant_reply": "Draft parsed from free-form model output.",
     }
 
 
@@ -299,7 +387,7 @@ def generate_summary(context: str) -> tuple[str, str]:
                 model_label = _model_label(provider)
                 return text.strip(), model_label
         except Exception as exc:
-            logger.warning("AI provider %s failed: %s", provider, exc)
+            logger.warning("Intelligence provider %s failed: %s", provider, exc)
             errors.append(f"{provider}: {exc}")
 
     mineral_line = _fallback_mineral_line(context)
@@ -355,7 +443,7 @@ def _call_provider(provider: str, context: str) -> str:
         return _groq(context)
     if provider == "gemini":
         return _gemini(context)
-    raise ValueError(f"Unknown AI provider: {provider}")
+    raise ValueError(f"Unknown intelligence provider: {provider}")
 
 
 def _call_map_provider(provider: str, context: str) -> str:
@@ -366,7 +454,7 @@ def _call_map_provider(provider: str, context: str) -> str:
         return _groq_custom(user_msg, MAP_INSIGHT_PROMPT)
     if provider == "gemini":
         return _gemini_custom(user_msg, MAP_INSIGHT_PROMPT)
-    raise ValueError(f"Unknown AI provider: {provider}")
+    raise ValueError(f"Unknown intelligence provider: {provider}")
 
 
 def _call_chat_provider(
@@ -403,7 +491,7 @@ def _call_chat_provider(
         return _groq_messages(chat_messages)
     if provider == "gemini":
         return _gemini_messages(chat_messages)
-    raise ValueError(f"Unknown AI provider: {provider}")
+    raise ValueError(f"Unknown intelligence provider: {provider}")
 
 
 def _ollama(context: str) -> str:
@@ -516,6 +604,105 @@ def _fallback_region_line(context: str) -> str:
 def _fallback_mineral_line(context: str) -> str:
     try:
         mineral = context.split("Mineral:")[1].split("\n")[0].strip()
-        return f"This report covers {mineral} prospectivity."
+        if mineral:
+            return f"This report covers {mineral} prospectivity."
     except (IndexError, AttributeError):
-        return "This report covers mineral prospectivity."
+        pass
+    return "This report covers mineral prospectivity."
+
+
+EXPLORATION_REPORT_PROMPT = (
+    "You are Terra Meta's geological exploration report writer. "
+    "Using ONLY the structured exploration data provided, write a professional report as JSON. "
+    "Schema:\n"
+    '{"title":"short title","executive_summary":"2-3 paragraphs",'
+    '"geological_interpretation":"2-4 paragraphs",'
+    '"layer_analysis":"1-3 paragraphs about selected layers and commodities",'
+    '"location_analysis":"1-2 paragraphs about the explored area",'
+    '"analytics_narrative":"1-2 paragraphs interpreting charts and statistics",'
+    '"recommendations":"3-5 bullet strings",'
+    '"data_references":"1 short paragraph citing datasets used"}'
+)
+
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Return embedding vectors for RAG retrieval. Falls back to bag-of-words hash embedding."""
+    if not texts:
+        return []
+
+    api_key = getattr(settings, "GEMINI_API_KEY", None)
+    if api_key:
+        try:
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"text-embedding-004:embedContent?key={api_key}"
+            )
+            vectors: list[list[float]] = []
+            for text in texts:
+                payload = {"model": "models/text-embedding-004", "content": {"parts": [{"text": text[:8000]}]}}
+                response = requests.post(url, json=payload, timeout=30)
+                response.raise_for_status()
+                values = response.json()["embedding"]["values"]
+                vectors.append(values)
+            return vectors
+        except Exception as exc:
+            logger.warning("Gemini embeddings failed, using fallback: %s", exc)
+
+    return [_hash_embedding(text) for text in texts]
+
+
+def _hash_embedding(text: str, dims: int = 128) -> list[float]:
+    import hashlib
+
+    vector = [0.0] * dims
+    tokens = re.findall(r"[a-z0-9]+", text.lower())
+    for token in tokens:
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        for index in range(dims):
+            vector[index] += (digest[index % len(digest)] / 255.0) - 0.5
+    norm = math.sqrt(sum(v * v for v in vector)) or 1.0
+    return [v / norm for v in vector]
+
+
+def generate_exploration_report(context_block: str, user_prompt: str = "") -> tuple[dict, str]:
+    providers = _provider_chain()
+    user_content = context_block
+    if user_prompt.strip():
+        user_content += f"\n\nUser request:\n{user_prompt.strip()}"
+    errors = []
+    for provider in providers:
+        try:
+            raw = _call_report_writing_provider(
+                provider,
+                user_content,
+                [{"role": "user", "content": "Generate the exploration report JSON."}],
+                system_prompt=EXPLORATION_REPORT_PROMPT,
+            )
+            parsed = _parse_exploration_report_response(raw)
+            if parsed.get("executive_summary"):
+                return parsed, _model_label(provider)
+        except Exception as exc:
+            errors.append(str(exc))
+    fallback = generate_map_insight(context_block)
+    text, model = fallback
+    return {
+        "title": "Exploration report",
+        "executive_summary": text,
+        "geological_interpretation": "",
+        "layer_analysis": "",
+        "location_analysis": "",
+        "analytics_narrative": "",
+        "recommendations": [],
+        "data_references": "Generated from mapped geological coverage data.",
+    }, model
+
+
+def _parse_exploration_report_response(raw: str) -> dict:
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"executive_summary": text, "title": "Exploration report"}

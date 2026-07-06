@@ -40,7 +40,7 @@ chmod +x deploy.sh
 
 PM2 processes started:
 - `terra-meta-api` - Gunicorn on port 8085
-- `terra-meta-celery` - background tasks (layer import, invoices, AI summaries)
+- `terra-meta-celery` - background tasks (layer import, invoices, Terra summaries)
 - `terra-meta-celery-beat` - scheduled jobs (subscription expiry, reminders)
 
 ```bash
@@ -110,7 +110,7 @@ Created (or reset) by `python manage.py seed_data`. Sign in with **email + passw
 python manage.py seed_data
 ```
 
-## AI summaries
+## Terra summaries
 
 Configure in `.env` (provider: `ollama`, `groq`, or `gemini`):
 

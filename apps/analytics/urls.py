@@ -2,7 +2,9 @@ from django.urls import path
 
 from .views import (
     AdminManagerPerformanceView,
+    AdminMineralAnalyticsView,
     AdminPlatformAnalyticsView,
+    AdminUserActivityAnalyticsView,
     AreaInsightsView,
     AssistantChatHistoryView,
     AssistantCreditsView,
@@ -23,6 +25,8 @@ urlpatterns = [
     path("investor/", InvestorDashboardView.as_view(), name="analytics-investor"),
     path("admin/", AdminPlatformAnalyticsView.as_view(), name="analytics-admin"),
     path("admin/managers/", AdminManagerPerformanceView.as_view(), name="analytics-admin-managers"),
+    path("admin/user-activity/", AdminUserActivityAnalyticsView.as_view(), name="analytics-admin-user-activity"),
+    path("admin/minerals/", AdminMineralAnalyticsView.as_view(), name="analytics-admin-minerals"),
     path("search-insights/", MineralSearchInsightsView.as_view(), name="analytics-search-insights"),
     path("mineral-catalog/", MineralCatalogView.as_view(), name="analytics-mineral-catalog"),
     path("mineral-exploration/", MineralExplorationQuotaView.as_view(), name="analytics-mineral-exploration"),

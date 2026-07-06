@@ -1,19 +1,61 @@
 from django.http import FileResponse, Http404
-from rest_framework import generics, status
+from rest_framework import generics, status, viewsets
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.accounts.permissions import IsAdminUser, IsMineralManagerOrAdmin
+from apps.accounts.permissions import IsMineralManagerOrAdmin
+from apps.analytics.credits import InsufficientAssistantCredits, consume_assistant_credit
+from apps.minerals.permissions import get_managed_mineral_ids, user_can_manage_mineral
 
-from .access import get_subscription_download_quota, record_subscription_download, user_can_download_report
+from .access import get_subscription_download_quota, record_subscription_download, user_can_download_report, user_has_report_detail_access
 from .ai_serializers import ReportAiAssistSerializer
 from .ai_service import generate_report_writing_assist
+from .article_service import sync_report_article_body
 from .context_extraction import extract_text_from_upload
-from .models import Report
+from .contextual import find_contextual_reports
+from .exploration_pdf_service import save_exploration_report_pdf
+from .exploration_service import generate_exploration_draft
+from .models import Report, ReportChatThread, UserExplorationReport
 from .pdf_service import ensure_report_pdf
-from .serializers import ReportAdminSerializer, ReportSerializer
-from .tasks import generate_report_summary
+from .rag_service import answer_report_chat, retrieve_report_chunks
+from .serializers import (
+    ReportAdminSerializer,
+    ReportChatSerializer,
+    ReportSerializer,
+    UserExplorationGenerateSerializer,
+    UserExplorationRefineSerializer,
+    UserExplorationReportSerializer,
+)
+from .tasks import generate_report_summary, index_report_pdf
+
+
+def _admin_report_queryset(user):
+    qs = (
+        Report.objects.all()
+        .select_related("mineral", "region")
+        .prefetch_related("ai_summary", "layers", "boundaries", "allowed_plans")
+    )
+    managed = get_managed_mineral_ids(user)
+    if managed is not None:
+        qs = qs.filter(mineral_id__in=managed)
+    return qs
+
+
+def _post_save_report(report, *, manual_summary: bool, pdf_changed: bool, regenerate_pdf: bool = False):
+    if manual_summary:
+        if not report.pdf_file:
+            ensure_report_pdf(report)
+        sync_report_article_body(report, force=True)
+        return
+    if pdf_changed:
+        generate_report_summary.delay(report.id)
+        index_report_pdf.delay(report.id)
+    elif regenerate_pdf:
+        ensure_report_pdf(report, force=True)
+        sync_report_article_body(report, force=True)
+    else:
+        sync_report_article_body(report)
 
 
 class ReportListView(generics.ListAPIView):
@@ -25,7 +67,23 @@ class ReportListView(generics.ListAPIView):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        return qs.prefetch_related("ai_summary", "purchases")
+        mineral = self.request.query_params.get("mineral")
+        region = self.request.query_params.get("region")
+        if mineral:
+            if mineral.isdigit():
+                qs = qs.filter(mineral_id=int(mineral))
+            else:
+                qs = qs.filter(mineral__slug=mineral)
+        if region:
+            if region.isdigit():
+                qs = qs.filter(region_id=int(region))
+        return qs.prefetch_related(
+            "ai_summary",
+            "purchases",
+            "layers",
+            "boundaries",
+            "allowed_plans",
+        )
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -40,7 +98,7 @@ class ReportDetailView(generics.RetrieveAPIView):
     queryset = (
         Report.objects.filter(is_active=True)
         .select_related("mineral", "region")
-        .prefetch_related("ai_summary", "purchases")
+        .prefetch_related("ai_summary", "purchases", "layers", "boundaries", "allowed_plans")
     )
     serializer_class = ReportSerializer
     permission_classes = [AllowAny]
@@ -55,36 +113,80 @@ class ReportDetailView(generics.RetrieveAPIView):
         return context
 
 
+class ContextualReportsView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        lat = request.query_params.get("lat")
+        lng = request.query_params.get("lng")
+        layer_ids_raw = request.query_params.get("layer_ids", "")
+        layer_ids = []
+        if layer_ids_raw:
+            for part in layer_ids_raw.split(","):
+                part = part.strip()
+                if part.isdigit():
+                    layer_ids.append(int(part))
+
+        boundary_id = request.query_params.get("boundary_id")
+        results = find_contextual_reports(
+            lat=float(lat) if lat else None,
+            lng=float(lng) if lng else None,
+            mineral_slug=request.query_params.get("mineral_slug", ""),
+            layer_ids=layer_ids or None,
+            boundary_id=int(boundary_id) if boundary_id and boundary_id.isdigit() else None,
+            country_code=request.query_params.get("country_code", "TZ"),
+            limit=int(request.query_params.get("limit", 6)),
+            request=request,
+        )
+        return Response({"results": results})
+
+
 class ReportAdminView(generics.ListCreateAPIView):
-    queryset = Report.objects.all().select_related("mineral", "region").prefetch_related("ai_summary")
     serializer_class = ReportAdminSerializer
     permission_classes = [IsMineralManagerOrAdmin]
 
+    def get_queryset(self):
+        return _admin_report_queryset(self.request.user)
+
     def perform_create(self, serializer):
+        mineral = serializer.validated_data.get("mineral")
+        if mineral and not user_can_manage_mineral(self.request.user, mineral.pk):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You cannot create reports for this commodity.")
+
+        if serializer.validated_data.get("pdf_file"):
+            serializer.validated_data.setdefault("source_type", Report.SourceType.UPLOADED)
+            serializer.validated_data.setdefault("report_format", Report.ReportFormat.PDF)
+
         report = serializer.save(created_by=self.request.user)
-        if serializer.context.get("manual_summary_saved"):
-            if not report.pdf_file:
-                ensure_report_pdf(report)
-            return
-        generate_report_summary.delay(report.id)
+        manual = serializer.context.get("manual_summary_saved")
+        _post_save_report(report, manual_summary=manual, pdf_changed=bool(report.pdf_file))
 
 
 class ReportAdminDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = Report.objects.all().select_related("mineral", "region").prefetch_related("ai_summary")
     serializer_class = ReportAdminSerializer
     permission_classes = [IsMineralManagerOrAdmin]
     lookup_field = "slug"
 
+    def get_queryset(self):
+        return _admin_report_queryset(self.request.user)
+
     def perform_update(self, serializer):
+        mineral = serializer.validated_data.get("mineral")
+        if mineral and not user_can_manage_mineral(self.request.user, mineral.id):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You cannot edit reports for this commodity.")
+
+        pdf_changed = "pdf_file" in serializer.validated_data
+        regenerate = self.request.data.get("regenerate_pdf") in (True, "true", "1", 1)
         report = serializer.save()
-        if serializer.context.get("manual_summary_saved"):
-            if not report.pdf_file:
-                ensure_report_pdf(report)
-            elif self.request.data.get("regenerate_pdf") in (True, "true", "1", 1):
-                ensure_report_pdf(report, force=True)
-            return
-        if "pdf_file" in serializer.validated_data:
-            generate_report_summary.delay(report.id)
+        manual = serializer.context.get("manual_summary_saved")
+        _post_save_report(
+            report,
+            manual_summary=manual,
+            pdf_changed=pdf_changed,
+            regenerate_pdf=regenerate,
+        )
 
 
 class ReportAdminGeneratePdfView(APIView):
@@ -92,13 +194,14 @@ class ReportAdminGeneratePdfView(APIView):
 
     def post(self, request, slug):
         try:
-            report = Report.objects.get(slug=slug)
+            report = _admin_report_queryset(request.user).get(slug=slug)
         except Report.DoesNotExist:
             raise Http404
 
         force = request.data.get("force") in (True, "true", "1", 1)
         try:
             ensure_report_pdf(report, force=force)
+            sync_report_article_body(report, force=True)
         except Exception as exc:
             return Response(
                 {"detail": f"PDF generation failed: {exc}"},
@@ -108,8 +211,6 @@ class ReportAdminGeneratePdfView(APIView):
 
 
 class ReportAdminAiAssistView(APIView):
-    """Draft or refine written report content with AI (+ optional uploaded context)."""
-
     permission_classes = [IsMineralManagerOrAdmin]
 
     def post(self, request):
@@ -142,6 +243,80 @@ class ReportAdminAiAssistView(APIView):
                 "key_findings": draft.get("key_findings") or [],
                 "assistant_reply": draft.get("assistant_reply") or "",
                 "model_used": model_used,
+            }
+        )
+
+
+class ReportChatView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, slug):
+        try:
+            report = Report.objects.get(slug=slug, is_active=True)
+        except Report.DoesNotExist:
+            raise Http404
+
+        if report.source_type != Report.SourceType.UPLOADED:
+            return Response({"messages": []})
+
+        if not user_has_report_detail_access(request.user, report):
+            return Response({"detail": "Full report access required."}, status=status.HTTP_403_FORBIDDEN)
+
+        thread, _ = ReportChatThread.objects.get_or_create(report=report, user=request.user)
+        return Response({"messages": thread.messages or []})
+
+    def post(self, request, slug):
+        try:
+            report = Report.objects.get(slug=slug, is_active=True)
+        except Report.DoesNotExist:
+            raise Http404
+
+        if report.source_type != Report.SourceType.UPLOADED or not report.pdf_file:
+            return Response({"detail": "PDF chat is only available for uploaded reports."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not user_has_report_detail_access(request.user, report):
+            return Response({"detail": "Full report access required."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = ReportChatSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        message = serializer.validated_data["message"].strip()
+
+        try:
+            from apps.analytics.models import AssistantCreditUsage
+            consume_assistant_credit(
+                request,
+                kind=AssistantCreditUsage.Kind.REPORT_CHAT,
+                user=request.user,
+                credits=1,
+            )
+        except InsufficientAssistantCredits as exc:
+            return Response(
+                {"detail": "Insufficient assistant credits.", "assistant_credits": exc.quota},
+                status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
+
+        thread, _ = ReportChatThread.objects.get_or_create(report=report, user=request.user)
+        history = list(thread.messages or [])
+        chunks = retrieve_report_chunks(report, message)
+        try:
+            reply, model_used = answer_report_chat(message, chunks, history)
+        except Exception as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        history.append({"role": "user", "content": message})
+        history.append({"role": "assistant", "content": reply, "model_used": model_used})
+        thread.messages = history[-40:]
+        thread.save(update_fields=["messages", "updated_at"])
+
+        return Response(
+            {
+                "reply": reply,
+                "model_used": model_used,
+                "citations": [
+                    {"page_number": chunk.page_number, "excerpt": chunk.text[:240]}
+                    for chunk in chunks[:3]
+                ],
+                "messages": thread.messages,
             }
         )
 
@@ -182,6 +357,149 @@ class ReportDownloadView(APIView):
         filename = f"{report.slug}.pdf"
         return FileResponse(
             report.pdf_file.open("rb"),
+            as_attachment=True,
+            filename=filename,
+        )
+
+
+class UserExplorationReportViewSet(viewsets.ModelViewSet):
+    serializer_class = UserExplorationReportSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return UserExplorationReport.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user, status=UserExplorationReport.Status.DRAFT)
+
+    def create(self, request, *args, **kwargs):
+        return Response(
+            {"detail": "Use POST /exploration/generate/ to create exploration reports."},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+
+
+class UserExplorationGenerateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = UserExplorationGenerateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            from apps.analytics.models import AssistantCreditUsage
+            consume_assistant_credit(
+                request,
+                kind=AssistantCreditUsage.Kind.EXPLORATION_GENERATE,
+                user=request.user,
+                credits=3,
+            )
+        except InsufficientAssistantCredits as exc:
+            return Response(
+                {"detail": "Insufficient assistant credits.", "assistant_credits": exc.quota},
+                status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
+
+        record = UserExplorationReport.objects.create(
+            user=request.user,
+            title=serializer.validated_data.get("title", ""),
+            prompt=serializer.validated_data["prompt"],
+            context=serializer.validated_data.get("context") or {},
+            status=UserExplorationReport.Status.DRAFT,
+        )
+        generate_exploration_draft(record)
+        record.refresh_from_db()
+        return Response(
+            UserExplorationReportSerializer(record).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class UserExplorationRefineView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            record = UserExplorationReport.objects.get(pk=pk, user=request.user)
+        except UserExplorationReport.DoesNotExist:
+            raise Http404
+
+        serializer = UserExplorationRefineSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            from apps.analytics.models import AssistantCreditUsage
+            consume_assistant_credit(
+                request,
+                kind=AssistantCreditUsage.Kind.EXPLORATION_REFINE,
+                user=request.user,
+                credits=1,
+            )
+        except InsufficientAssistantCredits as exc:
+            return Response(
+                {"detail": "Insufficient assistant credits.", "assistant_credits": exc.quota},
+                status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
+
+        record.revision_notes = (
+            f"{record.revision_notes}\n{serializer.validated_data['revision_notes']}".strip()
+        )
+        record.save(update_fields=["revision_notes", "updated_at"])
+        generate_exploration_draft(record)
+        record.refresh_from_db()
+        return Response(UserExplorationReportSerializer(record).data)
+
+
+class UserExplorationExportPdfView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            record = UserExplorationReport.objects.get(pk=pk, user=request.user)
+        except UserExplorationReport.DoesNotExist:
+            raise Http404
+
+        if record.status != UserExplorationReport.Status.READY:
+            return Response({"detail": "Report is not ready for export."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            from apps.analytics.models import AssistantCreditUsage
+            consume_assistant_credit(
+                request,
+                kind=AssistantCreditUsage.Kind.EXPLORATION_EXPORT,
+                user=request.user,
+                credits=5,
+            )
+        except InsufficientAssistantCredits as exc:
+            return Response(
+                {"detail": "Insufficient assistant credits.", "assistant_credits": exc.quota},
+                status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
+
+        try:
+            save_exploration_report_pdf(record)
+        except Exception as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        record.refresh_from_db()
+        return Response(UserExplorationReportSerializer(record).data)
+
+
+class UserExplorationDownloadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        try:
+            record = UserExplorationReport.objects.get(pk=pk, user=request.user)
+        except UserExplorationReport.DoesNotExist:
+            raise Http404
+
+        if not record.pdf_file:
+            return Response({"detail": "No PDF exported yet."}, status=status.HTTP_404_NOT_FOUND)
+
+        filename = f"exploration-{record.id}.pdf"
+        return FileResponse(
+            record.pdf_file.open("rb"),
             as_attachment=True,
             filename=filename,
         )

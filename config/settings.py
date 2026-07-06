@@ -277,7 +277,7 @@ MAP_FEATURE_MAX_GEOMETRY_BYTES = int(os.getenv("MAP_FEATURE_MAX_GEOMETRY_BYTES",
 # Icon URL override for HTML emails (optional)
 EMAIL_LOGO_URL = os.getenv("EMAIL_LOGO_URL", "").strip()
 
-# AI summaries - provider: ollama | groq | gemini (with comma-separated fallbacks)
+# Intelligence summaries - provider: ollama | groq | gemini (with comma-separated fallbacks)
 AI_PROVIDER = os.getenv("AI_PROVIDER", "groq")
 AI_PROVIDER_FALLBACK = os.getenv("AI_PROVIDER_FALLBACK", "groq,gemini,ollama")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")

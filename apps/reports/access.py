@@ -7,17 +7,7 @@ from django.utils import timezone
 from apps.accounts.models import User
 from apps.subscriptions.models import DownloadPurchase, SubscriptionPlan, SubscriptionReportDownload, UserSubscription
 
-
-def user_has_report_detail_access(user, report=None) -> bool:
-    if not user.is_authenticated:
-        return False
-    if user.has_paid_access or user.is_admin_user:
-        return True
-    if user.role == User.Role.MINERAL_MANAGER:
-        return True
-    if report is not None:
-        return report.purchases.filter(user=user).exists()
-    return False
+from .models import Report
 
 
 def _active_paid_subscription(user) -> UserSubscription | None:
@@ -41,6 +31,60 @@ def _active_paid_subscription(user) -> UserSubscription | None:
     return qs.order_by("-end_date").distinct().first()
 
 
+def _user_on_allowed_plan(user, report: Report) -> bool:
+    sub = _active_paid_subscription(user)
+    if not sub:
+        return False
+    allowed = report.allowed_plans.all()
+    if not allowed.exists():
+        return True
+    return allowed.filter(pk=sub.plan_id).exists()
+
+
+def _is_staff_or_manager(user) -> bool:
+    return user.is_authenticated and (
+        user.is_admin_user or user.role == User.Role.MINERAL_MANAGER
+    )
+
+
+def user_has_report_detail_access(user, report: Report | None = None) -> bool:
+    if _is_staff_or_manager(user):
+        return True
+
+    if report is None:
+        if not user.is_authenticated:
+            return False
+        if user.has_paid_access:
+            return True
+        return False
+
+    access_type = report.access_type or Report.AccessType.PAID
+
+    if access_type == Report.AccessType.FREE:
+        return True
+
+    if not user.is_authenticated:
+        return False
+
+    if DownloadPurchase.objects.filter(user=user, report=report).exists():
+        return True
+
+    if access_type in (
+        Report.AccessType.SUBSCRIBER_ONLY,
+        Report.AccessType.SUBSCRIBER_OR_PAID,
+    ):
+        if _user_on_allowed_plan(user, report):
+            return True
+
+    if access_type == Report.AccessType.PAID and user.has_paid_access:
+        return True
+
+    if access_type == Report.AccessType.SUBSCRIBER_OR_PAID:
+        return False
+
+    return False
+
+
 def _plan_download_limit(plan) -> int:
     if plan.included_report_downloads:
         return plan.included_report_downloads
@@ -52,7 +96,7 @@ def _plan_download_limit(plan) -> int:
 def get_subscription_download_quota(user) -> dict | None:
     if not user.is_authenticated:
         return None
-    if user.is_admin_user or user.role == User.Role.MINERAL_MANAGER:
+    if _is_staff_or_manager(user):
         return {
             "limit": None,
             "used": 0,
@@ -80,32 +124,49 @@ def get_subscription_download_quota(user) -> dict | None:
     }
 
 
-def user_can_download_report(user, report) -> tuple[bool, str | None]:
+def user_can_download_report(user, report: Report) -> tuple[bool, str | None]:
     if not user.is_authenticated:
         return False, None
-    if user.is_admin_user or user.role == User.Role.MINERAL_MANAGER:
+
+    if _is_staff_or_manager(user):
         return True, "admin"
+
+    access_type = report.access_type or Report.AccessType.PAID
+
+    if access_type == Report.AccessType.FREE:
+        return True, "free"
+
     if DownloadPurchase.objects.filter(user=user, report=report).exists():
         return True, "purchase"
 
-    sub = _active_paid_subscription(user)
-    if not sub:
+    if access_type in (
+        Report.AccessType.SUBSCRIBER_ONLY,
+        Report.AccessType.SUBSCRIBER_OR_PAID,
+    ):
+        if not _user_on_allowed_plan(user, report):
+            if access_type == Report.AccessType.SUBSCRIBER_ONLY:
+                return False, None
+        else:
+            sub = _active_paid_subscription(user)
+            if sub:
+                if SubscriptionReportDownload.objects.filter(
+                    subscription=sub, user=user, report=report
+                ).exists():
+                    return True, "subscription"
+                limit = _plan_download_limit(sub.plan)
+                used = SubscriptionReportDownload.objects.filter(
+                    subscription=sub, user=user
+                ).count()
+                if used < limit:
+                    return True, "subscription"
+
+    if access_type in (Report.AccessType.PAID, Report.AccessType.SUBSCRIBER_OR_PAID):
         return False, None
-
-    if SubscriptionReportDownload.objects.filter(
-        subscription=sub, user=user, report=report
-    ).exists():
-        return True, "subscription"
-
-    limit = _plan_download_limit(sub.plan)
-    used = SubscriptionReportDownload.objects.filter(subscription=sub, user=user).count()
-    if used < limit:
-        return True, "subscription"
 
     return False, None
 
 
-def record_subscription_download(user, report) -> None:
+def record_subscription_download(user, report: Report) -> None:
     sub = _active_paid_subscription(user)
     if not sub:
         return

@@ -711,6 +711,7 @@ def boundaries_feature_collection(
                     "name_sw": boundary.name_sw,
                     "code": boundary.code,
                     "region_id": boundary.region_id,
+                    "parent_id": boundary.parent_id,
                     "center_lat": boundary.center_lat,
                     "center_lng": boundary.center_lng,
                 },

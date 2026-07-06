@@ -1176,11 +1176,11 @@ def build_platform_ai_context(locale: str = "en") -> str:
             f"Jukwaa: Terra Meta, jukwaa la ujasili wa madini.\n"
             f"Madini kwenye ramani: {names or 'mbalimbali'}.\n"
             "Bure: kuchunguza ramani, kujifunza kuhusu jukwaa hapa.\n"
-            "Usajili: lebo za maeneo, uchambuzi, maarifa ya eneo kutoka AI, ripoti."
+            "Usajili: lebo za maeneo, uchambuzi, maarifa ya eneo kutoka Terra, ripoti."
         )
     return (
         f"Product: Terra Meta, a mineral intelligence platform.\n"
         f"Map minerals include: {names or 'several commodities'}.\n"
         "Free tier: browse the map and ask about the platform here.\n"
-        "Paid: zone labels, analytics, location AI on map clicks, report downloads."
+        "Paid: zone labels, analytics, location Terra insights on map clicks, report downloads."
     )

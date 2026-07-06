@@ -13,7 +13,7 @@ class Command(BaseCommand):
             slug="monthly-standard",
             defaults={
                 "name": "Monthly Standard",
-                "description": "Terra insights, show-on-map, full AI, analytics, and 3 PDF downloads per month",
+                "description": "Terra insights, show-on-map, full intelligence, analytics, and 3 PDF downloads per month",
                 "billing_cycle": "monthly",
                 "price": 100000,
                 "currency": "TZS",
@@ -44,7 +44,7 @@ class Command(BaseCommand):
             slug="annual-standard",
             defaults={
                 "name": "Annual Standard",
-                "description": "Full year: Terra insights, show-on-map, full AI, analytics, and 10 PDF downloads",
+                "description": "Full year: Terra insights, show-on-map, full intelligence, analytics, and 10 PDF downloads",
                 "billing_cycle": "annual",
                 "price": 1800000,
                 "currency": "TZS",

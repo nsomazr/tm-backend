@@ -6,6 +6,7 @@ from django.db.models import Count, Prefetch, Q
 from django.http import HttpResponse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAuthenticatedOrReadOnly
 from rest_framework.response import Response
@@ -58,6 +59,45 @@ class MapLayerViewSet(viewsets.ModelViewSet):
     filterset_class = MapLayerFilter
     search_fields = ["name", "name_sw"]
     lookup_field = "slug"
+
+    def _mineral_slug_param(self):
+        mineral_slug = (self.request.query_params.get("mineral_slug") or "").strip()
+        if mineral_slug:
+            return mineral_slug
+        if hasattr(self.request, "data"):
+            return (self.request.data.get("mineral_slug") or "").strip()
+        return ""
+
+    def get_object(self):
+        queryset = self.filter_queryset(self.get_queryset())
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        filter_kwargs = {self.lookup_field: self.kwargs[lookup_url_kwarg]}
+        matches = queryset.filter(**filter_kwargs)
+        count = matches.count()
+        if count == 1:
+            obj = matches.first()
+            self.check_object_permissions(self.request, obj)
+            return obj
+        if count == 0:
+            raise NotFound()
+        mineral_slug = self._mineral_slug_param()
+        if mineral_slug:
+            narrowed = matches.filter(mineral__slug=mineral_slug)
+            if narrowed.count() == 1:
+                obj = narrowed.first()
+                self.check_object_permissions(self.request, obj)
+                return obj
+            if narrowed.count() == 0:
+                raise NotFound()
+        slug = filter_kwargs[self.lookup_field]
+        raise ValidationError(
+            {
+                "detail": (
+                    f"Multiple layers match slug '{slug}'. "
+                    "Provide mineral_slug to identify the target layer."
+                )
+            }
+        )
 
     def get_serializer_class(self):
         if self.action == "retrieve":
