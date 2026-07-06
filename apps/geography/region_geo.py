@@ -60,9 +60,26 @@ def region_bounds(name: str, delta: float = 0.45) -> dict:
     }
 
 
-def region_at_point(lat: float, lng: float) -> str | None:
-    """Best-effort Tanzania admin region for a WGS84 click point."""
-    from apps.maps.geometry_utils import haversine_km
+def region_at_point(lat: float, lng: float, country_code: str = "TZ") -> str | None:
+    """Best-effort admin region for a WGS84 click point."""
+    from apps.maps.geometry_utils import haversine_km, point_in_geometry
+
+    from .models import AdminBoundary, Country
+
+    try:
+        country = Country.objects.get(code=country_code.upper())
+    except Country.DoesNotExist:
+        country = None
+
+    if country:
+        regions = AdminBoundary.objects.filter(
+            country=country,
+            level=AdminBoundary.Level.REGION,
+            source=AdminBoundary.Source.ADMIN_UPLOAD,
+        )
+        for boundary in regions:
+            if point_in_geometry(lng, lat, boundary.geometry):
+                return boundary.name
 
     containing: list[tuple[float, str]] = []
     for name, (rlat, rlng, _z) in REGION_CENTERS.items():

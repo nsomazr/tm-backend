@@ -4,13 +4,13 @@ PLAN_LABELS: dict[str, dict[str, dict[str, str]]] = {
     "monthly-standard": {
         "sw": {
             "name": "Kiwango cha Kila Mwezi",
-            "description": "Ufikiaji kamili wa ramani zote za madini na uchambuzi",
+            "description": "Maarifa ya Terra, onyesha kwenye ramani, AI kamili, uchambuzi, na upakuaji 3 wa PDF kwa mwezi",
         },
     },
     "annual-standard": {
         "sw": {
             "name": "Kiwango cha Mwaka",
-            "description": "Ufikiaji wa mwaka mzima na akiba ya asilimia 20",
+            "description": "Mwaka mzima: maarifa ya Terra, onyesha kwenye ramani, AI kamili, uchambuzi, na upakuaji 10 wa PDF",
         },
     },
 }

@@ -20,6 +20,9 @@ class Command(BaseCommand):
             if not layer:
                 self.stdout.write(self.style.WARNING(f"Skipping {slug}: layer not found"))
                 continue
+            if layer.layer_type == MapLayer.LayerType.POLYGON:
+                self.stdout.write(self.style.WARNING(f"Skipping {slug}: polygon layers are not seeded"))
+                continue
 
             out_path = os.path.join(out_dir, f"{slug}.zip")
             if layer.layer_type == "line":

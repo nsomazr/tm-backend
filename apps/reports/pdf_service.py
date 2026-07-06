@@ -127,7 +127,7 @@ def build_report_pdf_bytes(report: Report) -> bytes:
     story.append(_wrap_text(report.title, title_style))
 
     mineral_name = report.mineral.name if report.mineral_id else "N/A"
-    region_name = report.region.name if report.region_id else "Tanzania (national)"
+    region_name = report.region.name if report.region_id else "National"
     story.append(_wrap_text(f"Mineral: {mineral_name}", subtitle_style))
     story.append(_wrap_text(f"Region: {region_name}", subtitle_style))
     story.append(
@@ -214,7 +214,7 @@ def build_report_pdf_bytes(report: Report) -> bytes:
         footer_text_y = 0.42 * inch
         canvas.setFont("Helvetica", 8)
         canvas.setFillColor(colors.HexColor("#64748b"))
-        canvas.drawString(left, footer_text_y, "Terra Meta · Mineral Intelligence for Tanzania")
+        canvas.drawString(left, footer_text_y, "Terra Meta · Mineral Intelligence Platform")
 
         page_label = f"Page {doc_template.page}"
         icon_size = 0.42 * inch

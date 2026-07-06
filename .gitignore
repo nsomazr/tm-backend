@@ -136,7 +136,9 @@ celerybeat.pid
 *.aof
 *.pid
 
-# RabbitMQ
+# Generated boundary map caches (large gzip GeoJSON)
+data/boundary_cache/
+
 mnesia/
 rabbitmq/
 rabbitmq-data/

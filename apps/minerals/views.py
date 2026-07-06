@@ -69,12 +69,13 @@ class MineralViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     def layers(self, request, slug=None):
         mineral = self.get_object()
-        from apps.maps.access import filter_layers_for_user
+        from apps.maps.access import filter_layers_for_user, layers_with_mapped_data
         from apps.maps.models import MapLayer
 
         layers = MapLayer.objects.filter(mineral=mineral, is_active=True).select_related(
             "mineral", "region"
         )
+        layers = layers_with_mapped_data(layers)
         layers = filter_layers_for_user(layers, request.user)
         serializer = MapLayerSerializer(layers, many=True, context={"request": request})
         return Response(serializer.data)

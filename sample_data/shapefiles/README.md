@@ -1,6 +1,5 @@
-# Sample prospect shapefiles
+# Sample shapefiles
 
-Each ZIP contains an ESRI shapefile for one map layer.
-Upload via Admin → Layers → Import Shapefile / ZIP.
+Polygon demo layers were removed. Upload your own shapefiles via **Admin → Layers**.
 
-Layers are placed in distinct Tanzania regions to avoid overlap on the map.
+Line sample ZIPs (if generated) are optional references only.

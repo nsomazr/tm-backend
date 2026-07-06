@@ -15,7 +15,7 @@ from apps.accounts.permissions import IsAdminUser, IsMineralManagerOrAdmin
 from apps.compliance.views import log_audit
 from apps.minerals.permissions import get_managed_mineral_ids, user_can_manage_mineral
 
-from .access import filter_layers_for_user, user_has_map_detail_access
+from .access import filter_layers_for_user, layers_with_mapped_data, user_has_map_detail_access
 from .filters import MapLayerFilter
 from .models import LayerUpload, LayerVersion, MapFeature, MapLayer
 from .shapefile_utils import detect_file_type
@@ -80,14 +80,15 @@ class MapLayerViewSet(viewsets.ModelViewSet):
                     )
                 )
                 if managed is not None:
-                    return qs.filter(mineral_id__in=managed)
-                return qs
-            return filter_layers_for_user(qs, self.request.user)
+                    return qs.filter(mineral_id__in=managed).order_by("z_index", "name")
+                return qs.order_by("z_index", "name")
+            qs = layers_with_mapped_data(qs)
+            return filter_layers_for_user(qs, self.request.user).order_by("z_index", "name")
 
         managed = get_managed_mineral_ids(self.request.user)
         if managed is not None:
-            return qs.filter(mineral_id__in=managed)
-        return qs
+            return qs.filter(mineral_id__in=managed).order_by("z_index", "name")
+        return qs.order_by("z_index", "name")
 
     def get_permissions(self):
         if self.action == "destroy":
@@ -105,15 +106,17 @@ class MapLayerViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         from django.utils.text import slugify
 
+        from .layer_defaults import get_or_create_general_mineral
+
         name = serializer.validated_data.get("name", "layer")
         slug = slugify(name)
         counter = 1
-        mineral = serializer.validated_data["mineral"]
+        mineral = serializer.validated_data.get("mineral") or get_or_create_general_mineral()
         base = slug
         while MapLayer.objects.filter(mineral=mineral, slug=slug).exists():
             slug = f"{base}-{counter}"
             counter += 1
-        layer = serializer.save(created_by=self.request.user, slug=slug)
+        layer = serializer.save(created_by=self.request.user, slug=slug, mineral=mineral)
         log_audit(
             self.request,
             "layer_create",
@@ -270,7 +273,7 @@ class MapLayerViewSet(viewsets.ModelViewSet):
         serializer = LayerReorderSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         layer_ids = serializer.validated_data["layer_ids"]
-        layers = list(MapLayer.objects.filter(id__in=layer_ids, is_active=True))
+        layers = list(MapLayer.objects.filter(id__in=layer_ids))
         if len(layers) != len(layer_ids):
             return Response({"detail": "One or more layers were not found."}, status=status.HTTP_400_BAD_REQUEST)
         for layer in layers:

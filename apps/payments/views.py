@@ -1,3 +1,4 @@
+import math
 import uuid
 
 from django.conf import settings
@@ -6,10 +7,13 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, status
+from rest_framework.exceptions import ValidationError
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from apps.analytics.aerial import extension_price, included_aerial_km2, max_billable_extra_km2
 
 from apps.accounts.permissions import IsAdminUser, IsSuperAdmin
 from apps.compliance.models import LicenseAgreement
@@ -69,7 +73,38 @@ def _build_checkout_order(request, data):
         amount = license_agreement.price
         currency = license_agreement.currency
 
+    elif order_type == PaymentOrder.OrderType.AERIAL:
+        lat = float(data["lat"])
+        lng = float(data["lng"])
+        zoom = int(data.get("zoom", 8))
+        try:
+            extra_km2 = float(data.get("extra_km2", 0))
+        except (TypeError, ValueError):
+            extra_km2 = 0.0
+        if extra_km2 <= 0:
+            raise ValidationError({"extra_km2": "Select how many extra km² to add around this click."})
+        if extra_km2 > max_billable_extra_km2():
+            raise ValidationError(
+                {"extra_km2": f"Maximum extension is {max_billable_extra_km2():.0f} km² per purchase."}
+            )
+        amount = extension_price(extra_km2)
+        currency = "TZS"
+        purchased_extra = int(math.ceil(extra_km2))
+        max_area_km2 = included_aerial_km2() + purchased_extra
+
     merchant_reference = uuid.uuid4().hex
+    gateway_meta = {}
+    if order_type == PaymentOrder.OrderType.AERIAL:
+        gateway_meta = {
+            "aerial": {
+                "lat": lat,
+                "lng": lng,
+                "zoom": zoom,
+                "purchased_extra_km2": purchased_extra,
+                "max_area_km2": max_area_km2,
+            }
+        }
+
     order = PaymentOrder.objects.create(
         user=user,
         order_type=order_type,
@@ -80,6 +115,7 @@ def _build_checkout_order(request, data):
         subscription=subscription,
         report=report,
         license_agreement=license_agreement,
+        gateway_response=gateway_meta,
     )
     return order
 

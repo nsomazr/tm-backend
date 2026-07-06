@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import struct
+import tempfile
 import zipfile
 from typing import Any
 
 import shapefile
+
+from .crs_utils import ensure_wgs84_geometry
 
 
 def detect_file_type(filename: str) -> str:
@@ -25,12 +30,59 @@ def detect_file_type(filename: str) -> str:
 
 def parse_upload_content(content: bytes, filename: str, file_type: str | None = None) -> list[dict[str, Any]]:
     ft = file_type or detect_file_type(filename)
-    if ft == "shapefile" or filename.lower().endswith(".shp"):
-        return shapefile_bytes_to_features(content)
-    if ft == "zip" or filename.lower().endswith(".zip"):
-        return _parse_zip(content)
-    data = json.loads(content)
-    return _normalize_features(data)
+    try:
+        if ft == "shapefile" or filename.lower().endswith(".shp"):
+            return shapefile_bytes_to_features(content)
+        if ft == "zip" or filename.lower().endswith(".zip"):
+            return _parse_zip(content)
+        data = _load_json_bytes(content)
+        return _normalize_features(data)
+    except (ValueError, json.JSONDecodeError, struct.error, shapefile.ShapefileException, OSError, UnicodeDecodeError, TypeError) as exc:
+        raise ValueError(_friendly_parse_error(exc)) from exc
+
+
+def _load_json_bytes(content: bytes) -> dict[str, Any]:
+    text = content.decode("utf-8-sig").strip()
+    decoder = json.JSONDecoder()
+    data, _idx = decoder.raw_decode(text)
+    if not isinstance(data, dict):
+        raise ValueError("Invalid GeoJSON: expected a JSON object.")
+    return data
+
+
+def _friendly_parse_error(exc: Exception) -> str:
+    message = str(exc).strip()
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == 28:
+        return "Server disk is full. Try uploading a GeoJSON file instead of a shapefile ZIP."
+    if isinstance(exc, UnicodeDecodeError):
+        return (
+            "Could not read attribute data (.dbf). "
+            "Re-export the shapefile with UTF-8 or Latin-1 text fields, "
+            "or upload GeoJSON instead."
+        )
+    if isinstance(exc, struct.error):
+        return (
+            "Could not read the shapefile inside the ZIP. "
+            "Zip the .shp, .shx, and .dbf together (same folder), "
+            "or export GeoJSON instead."
+        )
+    if "ZIP" in message or "Shapefile" in message or "GeoJSON" in message:
+        return message
+    return f"Could not parse upload: {message or exc.__class__.__name__}"
+
+
+def _is_mac_junk(name: str) -> bool:
+    lower = name.lower()
+    if lower.startswith("__macosx/"):
+        return True
+    basename = name.rsplit("/", 1)[-1]
+    return basename.startswith("._")
+
+
+def _is_valid_shp_entry(name: str) -> bool:
+    if not name.lower().endswith(".shp"):
+        return False
+    return not _is_mac_junk(name)
 
 
 def _parse_zip(content: bytes) -> list[dict[str, Any]]:
@@ -43,26 +95,124 @@ def _parse_zip(content: bytes) -> list[dict[str, Any]]:
         if total_size > max_uncompressed:
             raise ValueError("ZIP uncompressed size exceeds limit.")
         names = zf.namelist()
-        shp_names = [n for n in names if n.lower().endswith(".shp")]
-        if shp_names:
-            return _shapefile_from_zip(zf, shp_names[0])
         for name in names:
+            if _is_mac_junk(name):
+                continue
             if name.lower().endswith((".geojson", ".json")):
-                return _normalize_features(json.loads(zf.read(name)))
-    raise ValueError("ZIP must contain a .shp set or GeoJSON file.")
+                return _normalize_features(_load_json_bytes(zf.read(name)))
+        shp_names = [n for n in names if _is_valid_shp_entry(n)]
+        errors: list[str] = []
+        for shp_name in sorted(shp_names, key=lambda n: zf.getinfo(n).file_size, reverse=True):
+            try:
+                return _shapefile_from_zip(zf, shp_name)
+            except ValueError as exc:
+                errors.append(f"{shp_name.rsplit('/', 1)[-1]}: {exc}")
+            except (struct.error, shapefile.ShapefileException) as exc:
+                errors.append(f"{shp_name.rsplit('/', 1)[-1]}: {exc}")
+        if shp_names and errors:
+            raise ValueError(
+                "No readable shapefile found in ZIP. " + "; ".join(errors[:2])
+            )
+    raise ValueError("ZIP must contain a .shp set (.shp + .shx + .dbf) or a GeoJSON file.")
+
+
+def _collect_shapefile_parts(zf: zipfile.ZipFile, shp_name: str) -> dict[str, bytes]:
+    """Find companion files (any letter case) in the same ZIP folder."""
+    directory = shp_name.rpartition("/")[0]
+    stem = shp_name.rsplit("/", 1)[-1][:-4].lower()
+    parts: dict[str, bytes] = {}
+
+    for name in zf.namelist():
+        if _is_mac_junk(name):
+            continue
+        name_dir = name.rpartition("/")[0]
+        if directory:
+            if name_dir != directory:
+                continue
+        elif "/" in name:
+            continue
+        base = name.rsplit("/", 1)[-1]
+        if "." not in base:
+            continue
+        file_stem, ext = base.rsplit(".", 1)
+        if file_stem.lower() != stem:
+            continue
+        parts[f".{ext.lower()}"] = zf.read(name)
+
+    return parts
+
+
+def _valid_shp_header(data: bytes) -> bool:
+    return len(data) >= 100 and data[0:4] == b"\x00\x00\x27\x0a"
+
+
+def _valid_shx_header(data: bytes) -> bool:
+    return len(data) >= 100 and data[0:4] == b"\x00\x00\x27\x0a"
+
+
+def _valid_dbf_header(data: bytes) -> bool:
+    """dBASE / FoxPro DBF version byte."""
+    if len(data) < 32:
+        return False
+    return data[0] in (
+        0x02,
+        0x03,
+        0x04,
+        0x05,
+        0x07,
+        0x30,
+        0x31,
+        0x32,
+        0x83,
+        0x8B,
+        0x8C,
+        0xF5,
+    )
+
+
+def _shapefile_reader_from_parts(parts: dict[str, bytes]) -> shapefile.Reader:
+    shp = parts[".shp"]
+    shx = parts.get(".shx")
+    dbf = parts.get(".dbf")
+
+    use_shx = bool(shx and _valid_shx_header(shx))
+    use_dbf = bool(dbf and _valid_dbf_header(dbf))
+
+    shp_io = io.BytesIO(shp)
+    shx_io = io.BytesIO(shx) if use_shx else None
+    dbf_io = io.BytesIO(dbf) if use_dbf else None
+
+    if shx_io and dbf_io:
+        for encoding in ("utf-8", "latin-1", "cp1252", "iso-8859-1"):
+            try:
+                return shapefile.Reader(
+                    shp=io.BytesIO(shp),
+                    shx=io.BytesIO(shx),
+                    dbf=io.BytesIO(dbf),
+                    encoding=encoding,
+                )
+            except UnicodeDecodeError:
+                continue
+        return shapefile.Reader(shp=io.BytesIO(shp), shx=io.BytesIO(shx), dbf=io.BytesIO(dbf))
+
+    if shx_io:
+        return shapefile.Reader(shp=io.BytesIO(shp), shx=io.BytesIO(shx))
+
+    return shapefile.Reader(shp=io.BytesIO(shp))
 
 
 def _shapefile_from_zip(zf: zipfile.ZipFile, shp_name: str) -> list[dict[str, Any]]:
-    base = shp_name[:-4]
-    parts = {}
-    for ext in (".shp", ".shx", ".dbf", ".prj"):
-        candidate = base + ext
-        match = next((n for n in zf.namelist() if n.lower() == candidate.lower()), None)
-        if match:
-            parts[ext] = zf.read(match)
-    if ".shp" not in parts or ".shx" not in parts:
-        raise ValueError("Shapefile ZIP requires at least .shp and .shx files.")
-    return shapefile_bytes_to_features(parts[".shp"], parts.get(".shx"), parts.get(".dbf"))
+    parts = _collect_shapefile_parts(zf, shp_name)
+
+    if ".shp" not in parts:
+        raise ValueError("missing .shp file")
+    if not _valid_shp_header(parts[".shp"]):
+        raise ValueError(".shp file is empty or invalid")
+
+    reader = _shapefile_reader_from_parts(parts)
+    prj = parts.get(".prj")
+    source_wkt = prj.decode("utf-8", errors="replace") if prj else None
+    return _features_from_reader(reader, source_wkt=source_wkt)
 
 
 def shapefile_bytes_to_features(
@@ -70,33 +220,67 @@ def shapefile_bytes_to_features(
     shx_bytes: bytes | None = None,
     dbf_bytes: bytes | None = None,
 ) -> list[dict[str, Any]]:
-    if shx_bytes and dbf_bytes:
-        reader = shapefile.Reader(
-            shp=io.BytesIO(shp_bytes),
-            shx=io.BytesIO(shx_bytes),
-            dbf=io.BytesIO(dbf_bytes),
-        )
-    else:
-        reader = shapefile.Reader(shp=io.BytesIO(shp_bytes))
+    parts: dict[str, bytes] = {".shp": shp_bytes}
+    if shx_bytes:
+        parts[".shx"] = shx_bytes
+    if dbf_bytes:
+        parts[".dbf"] = dbf_bytes
+    reader = _shapefile_reader_from_parts(parts)
+    return _features_from_reader(reader)
 
+
+def _features_from_reader(
+    reader: shapefile.Reader,
+    *,
+    source_wkt: str | None = None,
+) -> list[dict[str, Any]]:
     field_names = [f[0] for f in reader.fields[1:]]
+    has_attributes = bool(field_names)
     features: list[dict[str, Any]] = []
 
-    for shape_rec in reader.iterShapeRecords():
-        geom = _shape_to_geojson(shape_rec.shape)
+    try:
+        count = reader.numRecords
+    except Exception:
+        count = None
+    if not count:
+        count = len(reader.shapes())
+
+    for i in range(count):
+        try:
+            shape = reader.shape(i)
+            record = reader.record(i) if has_attributes else []
+        except (struct.error, shapefile.ShapefileException, IndexError, UnicodeDecodeError):
+            continue
+        geom = _shape_to_geojson(shape)
         if not geom:
             continue
-        props = {}
-        for i, name in enumerate(field_names):
-            val = shape_rec.record[i]
-            if isinstance(val, bytes):
-                val = val.decode("utf-8", errors="replace")
-            props[name] = val
-        features.append({"type": "Feature", "geometry": geom, "properties": props})
+        geom = ensure_wgs84_geometry(geom, source_wkt=source_wkt)
+        if not geom:
+            continue
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": geom,
+                "properties": _record_to_props(list(record), field_names),
+            }
+        )
 
     if not features:
-        raise ValueError("Shapefile contains no readable features.")
+        raise ValueError("Shapefile contains no readable polygon/line/point features.")
     return features
+
+
+def _record_to_props(record: list[Any], field_names: list[str]) -> dict[str, Any]:
+    props: dict[str, Any] = {}
+    for i, name in enumerate(field_names):
+        if i >= len(record):
+            break
+        val = record[i]
+        if isinstance(val, bytes):
+            val = val.decode("utf-8", errors="replace")
+        props[name] = val
+    return props
+
 
 
 def _shape_to_geojson(shape: shapefile.Shape) -> dict[str, Any] | None:
@@ -148,9 +332,6 @@ def write_polygon_shapefile_zip(
     out_path: str,
 ) -> None:
     """Write polygon features (with properties name, region) to a shapefile zip."""
-    import os
-    import tempfile
-
     with tempfile.TemporaryDirectory() as tmp:
         base = os.path.join(tmp, "layer")
         w = shapefile.Writer(base, shapeType=shapefile.POLYGON)
@@ -180,9 +361,6 @@ def write_polygon_shapefile_zip(
 
 
 def write_line_shapefile_zip(features: list[dict[str, Any]], out_path: str) -> None:
-    import os
-    import tempfile
-
     with tempfile.TemporaryDirectory() as tmp:
         base = os.path.join(tmp, "layer")
         w = shapefile.Writer(base, shapeType=shapefile.POLYLINE)

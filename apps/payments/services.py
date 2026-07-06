@@ -10,8 +10,7 @@ from reportlab.pdfgen import canvas
 
 from django.conf import settings
 
-from apps.accounts.models import User
-from apps.subscriptions.models import DownloadPurchase, UserSubscription
+from apps.analytics.models import AerialAnalysisGrant
 
 from .models import Invoice, PaymentOrder
 from .snippe import (
@@ -73,6 +72,10 @@ def _order_description(order):
         return "Terra Meta subscription payment"
     if order.order_type == PaymentOrder.OrderType.DOWNLOAD:
         return f"Report download: {order.report.title if order.report else 'N/A'}"
+    if order.order_type == PaymentOrder.OrderType.AERIAL:
+        aerial = (order.gateway_response or {}).get("aerial", {})
+        extra = aerial.get("purchased_extra_km2", 0)
+        return f"Extended aerial map analysis (+{extra:.0f} km²)"
     return "Terra Meta license payment"
 
 
@@ -107,6 +110,19 @@ def activate_order(order, transaction_data=None):
                 "currency": order.currency,
             },
         )
+
+    elif order.order_type == PaymentOrder.OrderType.AERIAL:
+        aerial = (order.gateway_response or {}).get("aerial", {})
+        if aerial:
+            AerialAnalysisGrant.objects.create(
+                user=order.user,
+                payment_order=order,
+                lat=float(aerial["lat"]),
+                lng=float(aerial["lng"]),
+                zoom=int(aerial.get("zoom", 8)),
+                max_area_km2=float(aerial["max_area_km2"]),
+                purchased_extra_km2=float(aerial.get("purchased_extra_km2", 0)),
+            )
 
     generate_invoice.delay(order.id)
 

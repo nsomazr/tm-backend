@@ -66,6 +66,10 @@ class CheckoutSerializer(serializers.Serializer):
     plan_id = serializers.IntegerField(required=False)
     report_id = serializers.IntegerField(required=False)
     license_id = serializers.IntegerField(required=False)
+    lat = serializers.FloatField(required=False)
+    lng = serializers.FloatField(required=False)
+    zoom = serializers.IntegerField(required=False, min_value=3, max_value=18)
+    extra_km2 = serializers.FloatField(required=False, min_value=1)
     msisdn = serializers.CharField(required=False, allow_blank=True, max_length=20)
     payment_method = serializers.ChoiceField(
         choices=[("mobile_money", "Mobile money"), ("card", "Card")],
@@ -87,6 +91,10 @@ class CheckoutSerializer(serializers.Serializer):
             raise serializers.ValidationError({"report_id": "Required for report checkout."})
         if order_type == PaymentOrder.OrderType.LICENSE and not attrs.get("license_id"):
             raise serializers.ValidationError({"license_id": "Required for license checkout."})
+        if order_type == PaymentOrder.OrderType.AERIAL:
+            for field in ("lat", "lng", "extra_km2"):
+                if attrs.get(field) is None:
+                    raise serializers.ValidationError({field: f"Required for analysis extension checkout."})
         if attrs.get("payment_method") == "mobile_money" and not attrs.get("msisdn"):
             # msisdn can come from user profile at checkout time
             pass

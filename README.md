@@ -39,9 +39,9 @@ chmod +x deploy.sh
 ```
 
 PM2 processes started:
-- `terra-meta-api` — Gunicorn on port 8085
-- `terra-meta-celery` — background tasks (layer import, invoices, AI summaries)
-- `terra-meta-celery-beat` — scheduled jobs (subscription expiry, reminders)
+- `terra-meta-api` - Gunicorn on port 8085
+- `terra-meta-celery` - background tasks (layer import, invoices, AI summaries)
+- `terra-meta-celery-beat` - scheduled jobs (subscription expiry, reminders)
 
 ```bash
 pm2 status
@@ -82,13 +82,13 @@ Webhook endpoint (register in the Snippe dashboard or pass per payment):
 POST https://api.terrameta.5ggeology.com/api/v1/payments/webhooks/snippe/
 ```
 
-For local development without Snippe credentials, keep `PAYMENTS_SIMULATE=true` in `.env` — checkouts auto-complete. **Never enable simulation when `DEBUG=False`.**
+For local development without Snippe credentials, keep `PAYMENTS_SIMULATE=true` in `.env` - checkouts auto-complete. **Never enable simulation when `DEBUG=False`.**
 
 Checkout flow:
-1. `POST /api/v1/payments/checkout/` — creates order and Snippe payment intent
-2. Mobile money — USSD push to the customer’s phone
-3. Card — redirect to Snippe secure checkout (`payment_url`)
-4. Webhook or `GET /api/v1/payments/orders/{merchant_reference}/status/` — confirms completion and activates subscriptions / report purchases
+1. `POST /api/v1/payments/checkout/` - creates order and Snippe payment intent
+2. Mobile money - USSD push to the customer’s phone
+3. Card - redirect to Snippe secure checkout (`payment_url`)
+4. Webhook or `GET /api/v1/payments/orders/{merchant_reference}/status/` - confirms completion and activates subscriptions / report purchases
 
 ## Default admin
 

@@ -15,7 +15,7 @@ from apps.subscriptions.models import SubscriptionPlan
 
 from .chat_history import user_has_chat_history
 
-FREE_MONTHLY_CREDITS = 500
+FREE_MONTHLY_CREDITS = 10
 ANONYMOUS_SESSION_CREDITS = 5
 DEFAULT_MONTHLY_PLAN_CREDITS = 3000
 DEFAULT_ANNUAL_PLAN_CREDITS = 5000
@@ -153,11 +153,12 @@ def get_assistant_credit_quota(request, user=None) -> dict:
 
 
 @transaction.atomic
-def consume_assistant_credit(request, *, kind: str, user=None) -> dict:
+def consume_assistant_credit(request, *, kind: str, user=None, credits: int = 1) -> dict:
     from .models import AssistantCreditUsage
 
     user = user if user is not None else getattr(request, "user", None)
     quota = get_assistant_credit_quota(request, user=user)
+    amount = max(1, int(credits))
 
     if quota.get("unlimited"):
         sub = _active_paid_subscription(user) if user and user.is_authenticated else None
@@ -166,11 +167,11 @@ def consume_assistant_credit(request, *, kind: str, user=None) -> dict:
             session_key="" if user and user.is_authenticated else _session_key(request),
             subscription=sub,
             kind=kind,
-            credits=1,
+            credits=amount,
         )
         return quota
 
-    if quota["remaining"] <= 0:
+    if (quota.get("remaining") or 0) < amount:
         raise InsufficientAssistantCredits(quota)
 
     sub = _active_paid_subscription(user) if user and user.is_authenticated else None
@@ -179,6 +180,6 @@ def consume_assistant_credit(request, *, kind: str, user=None) -> dict:
         session_key="" if user and user.is_authenticated else _session_key(request),
         subscription=sub if sub else None,
         kind=kind,
-        credits=1,
+        credits=amount,
     )
     return get_assistant_credit_quota(request, user=user)

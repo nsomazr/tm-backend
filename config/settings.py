@@ -1,6 +1,7 @@
 import os
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
@@ -9,9 +10,26 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def _split_env_list(name: str, default: str = "") -> list[str]:
+    return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
+
+
+def _origin_from_url(url: str) -> str:
+    parsed = urlparse(url.strip())
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+    return url.strip().rstrip("/")
+
+
+def _host_from_url(url: str) -> str:
+    parsed = urlparse(url.strip())
+    return parsed.hostname or url.strip().removeprefix("https://").removeprefix("http://").split("/")[0]
+
+
 SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-dev-key-change-in-production")
 DEBUG = os.getenv("DEBUG", "True").lower() in ("true", "1", "yes")
-ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
+ALLOWED_HOSTS = _split_env_list("ALLOWED_HOSTS", "localhost,127.0.0.1")
 
 _INSECURE_SECRET_KEYS = {
     "",
@@ -142,12 +160,35 @@ SIMPLE_JWT = {
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
-CORS_ALLOWED_ORIGINS = [
-    o.strip()
-    for o in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3085").split(",")
-    if o.strip()
-]
+CORS_ALLOWED_ORIGINS = _split_env_list("CORS_ALLOWED_ORIGINS", "http://localhost:3085")
 CORS_ALLOW_CREDENTIALS = True
+
+NGROK_URL = os.getenv("NGROK_URL", "").strip().rstrip("/")
+NGROK_API_URL = os.getenv("NGROK_API_URL", "").strip().rstrip("/")
+NGROK_ALLOW_WILDCARD = os.getenv("NGROK_ALLOW_WILDCARD", "false").lower() in ("1", "true", "yes")
+
+_ngrok_origins: list[str] = []
+_ngrok_hosts: list[str] = []
+for raw_url in (NGROK_URL, NGROK_API_URL):
+    if not raw_url:
+        continue
+    origin = _origin_from_url(raw_url)
+    host = _host_from_url(raw_url)
+    if origin:
+        _ngrok_origins.append(origin)
+    if host:
+        _ngrok_hosts.append(host)
+
+if _ngrok_origins:
+    CORS_ALLOWED_ORIGINS = list(dict.fromkeys([*CORS_ALLOWED_ORIGINS, *_ngrok_origins]))
+if _ngrok_hosts:
+    ALLOWED_HOSTS = list(dict.fromkeys([*ALLOWED_HOSTS, *_ngrok_hosts]))
+if NGROK_ALLOW_WILDCARD or DEBUG:
+    ALLOWED_HOSTS = list(dict.fromkeys([*ALLOWED_HOSTS, ".ngrok-free.app", ".ngrok.io"]))
+    CORS_ALLOWED_ORIGIN_REGEXES = [
+        r"^https://[\w-]+\.ngrok-free\.app$",
+        r"^https://[\w-]+\.ngrok\.io$",
+    ]
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3085")
 
@@ -198,6 +239,11 @@ if not SNIPPE_REDIRECT_URL:
 if not SNIPPE_CANCEL_URL:
     SNIPPE_CANCEL_URL = f"{FRONTEND_URL}/subscriptions"
 
+# Aerial map analysis: included km² per view and price per extra km² (TZS).
+AERIAL_INCLUDED_KM2 = float(os.getenv("AERIAL_INCLUDED_KM2", "10"))
+AERIAL_PRICE_PER_KM2 = os.getenv("AERIAL_PRICE_PER_KM2", "10000")
+AERIAL_MAX_BILLABLE_EXTRA_KM2 = float(os.getenv("AERIAL_MAX_BILLABLE_EXTRA_KM2", "500"))
+
 # Local dev only: auto-complete checkout when Snippe is not configured.
 PAYMENTS_SIMULATE = os.getenv("PAYMENTS_SIMULATE", "false").lower() in ("1", "true", "yes")
 if not DEBUG and PAYMENTS_SIMULATE:
@@ -205,6 +251,9 @@ if not DEBUG and PAYMENTS_SIMULATE:
 
 # Max shapefile / GeoJSON upload size (bytes)
 MAP_UPLOAD_MAX_BYTES = int(os.getenv("MAP_UPLOAD_MAX_BYTES", str(50 * 1024 * 1024)))
+MAP_FEATURE_BULK_BATCH_SIZE = int(os.getenv("MAP_FEATURE_BULK_BATCH_SIZE", "25"))
+MAP_FEATURE_MAX_BATCH_BYTES = int(os.getenv("MAP_FEATURE_MAX_BATCH_BYTES", str(1024 * 1024)))
+MAP_FEATURE_MAX_GEOMETRY_BYTES = int(os.getenv("MAP_FEATURE_MAX_GEOMETRY_BYTES", str(512 * 1024)))
 
 # Icon URL override for HTML emails (optional)
 EMAIL_LOGO_URL = os.getenv("EMAIL_LOGO_URL", "").strip()
@@ -219,14 +268,12 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
-CSRF_TRUSTED_ORIGINS = [
-    o.strip()
-    for o in os.getenv(
-        "CSRF_TRUSTED_ORIGINS",
-        "https://terrameta.5ggeology.com,https://api.terrameta.5ggeology.com",
-    ).split(",")
-    if o.strip()
-]
+CSRF_TRUSTED_ORIGINS = _split_env_list(
+    "CSRF_TRUSTED_ORIGINS",
+    "https://terrameta.5ggeology.com,https://api.terrameta.5ggeology.com",
+)
+if _ngrok_origins:
+    CSRF_TRUSTED_ORIGINS = list(dict.fromkeys([*CSRF_TRUSTED_ORIGINS, *_ngrok_origins]))
 
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")

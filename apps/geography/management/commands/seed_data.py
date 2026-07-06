@@ -7,6 +7,8 @@ from apps.accounts.models import User
 from apps.compliance.models import TermsVersion
 from apps.geography.models import Country, Region
 from apps.geography.region_geo import region_bounds
+from apps.geography.country_geo import preset_for_code
+from apps.geography.world_countries import WORLD_COUNTRIES
 from apps.minerals.models import Mineral, MineralCategory, MineralManagerAssignment
 from apps.maps.models import MapLayer
 from apps.subscriptions.models import SubscriptionPlan, UserSubscription
@@ -34,8 +36,79 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         country, _ = Country.objects.get_or_create(
             code="TZ",
-            defaults={"name": "Tanzania", "name_sw": "Tanzania"},
+            defaults={
+                "name": "Tanzania",
+                "name_sw": "Tanzania",
+                **preset_for_code("TZ"),
+            },
         )
+        tz_preset = preset_for_code("TZ")
+        country.center_lat = tz_preset["center_lat"]
+        country.center_lng = tz_preset["center_lng"]
+        country.default_zoom = tz_preset["default_zoom"]
+        country.bounds = tz_preset["bounds"]
+        country.boundary = tz_preset["boundary"]
+        country.save(
+            update_fields=[
+                "center_lat",
+                "center_lng",
+                "default_zoom",
+                "bounds",
+                "boundary",
+            ]
+        )
+
+        for extra_code in ("KE", "UG"):
+            preset = preset_for_code(extra_code)
+            if not preset:
+                continue
+            extra, created = Country.objects.get_or_create(
+                code=extra_code,
+                defaults={
+                    "name": "Kenya" if extra_code == "KE" else "Uganda",
+                    "name_sw": "Kenya" if extra_code == "KE" else "Uganda",
+                    "center_lat": preset["center_lat"],
+                    "center_lng": preset["center_lng"],
+                    "default_zoom": preset["default_zoom"],
+                    "bounds": preset["bounds"],
+                    "boundary": preset["boundary"],
+                    "is_active": True,
+                },
+            )
+            if not created and not extra.bounds:
+                extra.center_lat = preset["center_lat"]
+                extra.center_lng = preset["center_lng"]
+                extra.default_zoom = preset["default_zoom"]
+                extra.bounds = preset["bounds"]
+                extra.boundary = preset["boundary"]
+                extra.save(
+                    update_fields=[
+                        "center_lat",
+                        "center_lng",
+                        "default_zoom",
+                        "bounds",
+                        "boundary",
+                    ]
+                )
+
+        for code, name in WORLD_COUNTRIES:
+            preset = preset_for_code(code)
+            defaults = {
+                "name": name,
+                "name_sw": name,
+                "is_active": True,
+            }
+            if preset:
+                defaults.update(
+                    {
+                        "center_lat": preset["center_lat"],
+                        "center_lng": preset["center_lng"],
+                        "default_zoom": preset["default_zoom"],
+                        "bounds": preset["bounds"],
+                        "boundary": preset["boundary"],
+                    }
+                )
+            Country.objects.get_or_create(code=code, defaults=defaults)
 
         for name in TANZANIA_REGIONS:
             bounds = region_bounds(name)
@@ -109,99 +182,30 @@ class Command(BaseCommand):
             )
             mineral_objs[slug] = obj
 
-        layer_defs = [
-            ("gold-priority-1", "Gold Priority 1", "Dhahabu - Kipaumbele - 1", gold, "polygon", "#E87722", True, 10),
-            ("gold-priority-2", "Gold Priority 2", "Dhahabu - Kipaumbele - 2", gold, "polygon", "#C4A035", False, 20),
-            ("gold-priority-3", "Gold Priority 3", "Dhahabu - Kipaumbele - 3", gold, "polygon", "#F5E6A3", False, 30),
-            ("host-graphite-gold", "Host Rocks Graphite+Gold", "Miamba Mwenyeji kwa Grafiti + Dhahabu", graphite, "polygon", "#1B5E20", True, 45),
-            ("host-graphite", "Host Rocks Graphite", "Miamba Mwenyeji kwa Grafiti", graphite, "polygon", "#81C784", False, 46),
-            ("graphite-zones", "Graphite Zones", "Grafiti", graphite, "polygon", "#2D2D2D", True, 40),
-            ("main-structures", "Main Linear Structures", "Miundo Mstari Mikuu", gold, "line", "#000000", True, 100),
-            ("linear-structures", "Linear Structures", "Miundo Mstari", gold, "line", "#333333", True, 110),
-            ("tanzanite-zones", "Tanzanite Zones", "Tanzanite", mineral_objs["tanzanite"], "polygon", "#7B2D8E", True, 50),
-            ("copper-zones", "Copper Zones", "Shaba", mineral_objs["copper"], "polygon", "#B87333", True, 60),
-            ("nickel-zones", "Nickel Zones", "Nikel", mineral_objs["nickel"], "polygon", "#708090", True, 70),
-            ("iron-zones", "Iron Ore Zones", "Chuma", mineral_objs["iron-ore"], "polygon", "#4A3728", True, 80),
-            ("lithium-zones", "Lithium Zones", "Lithiamu", mineral_objs["lithium"], "polygon", "#00CED1", True, 90),
-        ]
+        from apps.maps.models import MapFeature, MapLayer
 
-        mwanza = Region.objects.filter(name="Mwanza").first()
-        arusha = Region.objects.filter(name="Arusha").first()
-
-        def region_named(name: str):
-            return Region.objects.filter(name=name).first() or mwanza
-
-        region_by_slug = {
-            "gold-priority-1": region_named("Geita"),
-            "gold-priority-2": region_named("Shinyanga"),
-            "gold-priority-3": region_named("Mara"),
-            "host-graphite-gold": mwanza,
-            "host-graphite": mwanza,
-            "graphite-zones": region_named("Lindi"),
-            "main-structures": region_named("Geita"),
-            "linear-structures": region_named("Geita"),
-            "tanzanite-zones": region_named("Manyara"),
-            "copper-zones": region_named("Kigoma"),
-            "nickel-zones": region_named("Morogoro"),
-            "iron-zones": region_named("Dodoma"),
-            "lithium-zones": region_named("Mbeya"),
-        }
-        for slug, name, name_sw, mineral, ltype, color, is_preview, z_index in layer_defs:
-            layer, created = MapLayer.objects.get_or_create(
-                mineral=mineral,
-                slug=slug,
-                defaults={
-                    "name": name,
-                    "name_sw": name_sw,
-                    "layer_type": ltype,
-                    "region": region_by_slug.get(slug, mwanza),
-                    "z_index": z_index,
-                    "is_preview": is_preview,
-                    "style": {
-                        "fill": color,
-                        "stroke": color if ltype == "polygon" else "#000000",
-                        "strokeWidth": 2 if slug == "main-structures" else 1,
-                        "fillOpacity": 0.55 if ltype == "polygon" else 1,
-                    },
-                },
-            )
-            if created:
-                layer.z_index = z_index
-                layer.save(update_fields=["z_index"])
-            else:
-                layer.name = name
-                layer.name_sw = name_sw
-                layer.layer_type = ltype
-                layer.region = region_by_slug.get(slug, mwanza)
-                layer.z_index = z_index
-                layer.is_preview = is_preview
-                layer.style = {
-                    "fill": color,
-                    "stroke": color if ltype == "polygon" else "#000000",
-                    "strokeWidth": 2 if slug == "main-structures" else 1,
-                    "fillOpacity": 0.55 if ltype == "polygon" else 1,
-                }
-                layer.save(
-                    update_fields=[
-                        "name",
-                        "name_sw",
-                        "layer_type",
-                        "region",
-                        "z_index",
-                        "is_preview",
-                        "style",
-                    ]
+        demo_layer_types = (MapLayer.LayerType.POLYGON, MapLayer.LayerType.LINE)
+        layer_ids_with_features = set(
+            MapFeature.objects.filter(is_active=True).values_list("layer_id", flat=True)
+        )
+        stale_layers = MapLayer.objects.filter(
+            layer_type__in=demo_layer_types, is_active=False
+        ).exclude(id__in=layer_ids_with_features)
+        cleared_layers = stale_layers.count()
+        if cleared_layers:
+            stale_layers.delete()
+            self.stdout.write(
+                self.style.WARNING(
+                    f"Removed {cleared_layers} inactive empty map layer(s). "
+                    "Upload shapefiles via Admin → Layers."
                 )
-
-        from django.core.management import call_command
-        call_command("load_sample_prospects")
-        call_command("generate_sample_shapefiles")
+            )
 
         monthly, _ = SubscriptionPlan.objects.get_or_create(
             slug="monthly-standard",
             defaults={
                 "name": "Monthly Standard",
-                "description": "Full map access, report exploration, and 3 PDF downloads per month",
+                "description": "Terra insights, show-on-map, full AI, analytics, and 3 PDF downloads per month",
                 "billing_cycle": "monthly",
                 "price": 50000,
                 "currency": "TZS",
@@ -211,8 +215,12 @@ class Command(BaseCommand):
         monthly.included_report_downloads = 3
         monthly.included_assistant_credits = 3000
         monthly.includes_chat_history = True
+        monthly.description = (
+            "Terra insights, show-on-map, full AI, analytics, and 3 PDF downloads per month"
+        )
         monthly.save(
             update_fields=[
+                "description",
                 "included_report_downloads",
                 "included_assistant_credits",
                 "includes_chat_history",
@@ -224,7 +232,7 @@ class Command(BaseCommand):
             slug="annual-standard",
             defaults={
                 "name": "Annual Standard",
-                "description": "Full year access with 10 included report PDF downloads",
+                "description": "Full year: Terra insights, show-on-map, full AI, analytics, and 10 PDF downloads",
                 "billing_cycle": "annual",
                 "price": 480000,
                 "currency": "TZS",
@@ -234,13 +242,18 @@ class Command(BaseCommand):
         annual.included_report_downloads = 10
         annual.included_assistant_credits = 5000
         annual.includes_chat_history = True
+        annual.description = (
+            "Full year: Terra insights, show-on-map, full AI, analytics, and 10 PDF downloads"
+        )
         annual.save(
             update_fields=[
+                "description",
                 "included_report_downloads",
                 "included_assistant_credits",
                 "includes_chat_history",
             ]
         )
+        annual.included_minerals.set(list(mineral_objs.values()))
 
         TermsVersion.objects.get_or_create(
             version="1.0",

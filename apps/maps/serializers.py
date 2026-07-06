@@ -3,6 +3,7 @@ import json
 from rest_framework import serializers
 
 from apps.maps.localization import get_request_locale, localized_name
+from apps.minerals.models import Mineral
 
 from .models import LayerUpload, LayerVersion, MapFeature, MapLayer
 
@@ -46,6 +47,11 @@ class MapLayerSerializer(serializers.ModelSerializer):
     created_by_name = serializers.SerializerMethodField()
     last_uploaded_by_name = serializers.SerializerMethodField()
     last_uploaded_at = serializers.SerializerMethodField()
+    mineral = serializers.PrimaryKeyRelatedField(
+        queryset=Mineral.objects.all(),
+        required=False,
+        allow_null=True,
+    )
 
     class Meta:
         model = MapLayer

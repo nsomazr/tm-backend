@@ -9,6 +9,7 @@ EARTH_RADIUS_KM = 6371.0
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    lat1, lon1, lat2, lon2 = float(lat1), float(lon1), float(lat2), float(lon2)
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
@@ -17,12 +18,12 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def point_hit_km(zoom: int) -> float:
-    """Max distance (km) from click to a point feature — scales with map zoom."""
+    """Max distance (km) from click to a point feature; scales with map zoom."""
     return min(1.5, max(0.08, (360 / (2 ** (zoom + 3))) * 111 * 0.45))
 
 
 def line_hit_km(zoom: int) -> float:
-    """Max distance (km) from click to a line feature — scales with map zoom."""
+    """Max distance (km) from click to a line feature; scales with map zoom."""
     return min(3.0, max(0.12, (360 / (2 ** (zoom + 2.5))) * 111 * 0.45))
 
 
@@ -107,6 +108,42 @@ def geometry_bbox(geometry: dict[str, Any] | None) -> tuple[float, float, float,
     if not lngs:
         return None
     return min(lats), max(lats), min(lngs), max(lngs)
+
+
+def ring_area_km2(ring: list[list[float]]) -> float:
+    """Geodesic area of a GeoJSON ring (lng, lat pairs) on the WGS84 sphere."""
+    if len(ring) < 3:
+        return 0.0
+    total = 0.0
+    for i in range(len(ring) - 1):
+        lng1, lat1 = math.radians(float(ring[i][0])), math.radians(float(ring[i][1]))
+        lng2, lat2 = math.radians(float(ring[i + 1][0])), math.radians(float(ring[i + 1][1]))
+        total += (lng2 - lng1) * (2 + math.sin(lat1) + math.sin(lat2))
+    return abs(total * (EARTH_RADIUS_KM**2) / 2.0)
+
+
+def geometry_area_km2(geometry: dict[str, Any] | None) -> float:
+    """Total geodesic area for Polygon or MultiPolygon GeoJSON geometries."""
+    if not geometry or "type" not in geometry:
+        return 0.0
+
+    gtype = geometry["type"]
+    coords = geometry.get("coordinates")
+    if not coords:
+        return 0.0
+
+    if gtype == "Polygon":
+        area = ring_area_km2(coords[0])
+        for hole in coords[1:]:
+            area -= ring_area_km2(hole)
+        return max(0.0, area)
+
+    if gtype == "MultiPolygon":
+        return sum(
+            geometry_area_km2({"type": "Polygon", "coordinates": poly}) for poly in coords
+        )
+
+    return 0.0
 
 
 def bbox_intersects_click(

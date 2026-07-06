@@ -9,6 +9,7 @@ class PaymentOrder(models.Model):
         SUBSCRIPTION = "subscription", "Subscription"
         DOWNLOAD = "download", "Report Download"
         LICENSE = "license", "License Agreement"
+        AERIAL = "aerial", "Aerial analysis extension"
 
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"

@@ -3,17 +3,79 @@ import zipfile
 from io import BytesIO
 
 from celery import shared_task
+from django.conf import settings
 from django.db import transaction
+from django.db.utils import OperationalError
 
 from .models import LayerUpload, LayerVersion, MapFeature, MapLayer
 from .shapefile_utils import detect_file_type, parse_upload_content
+
+DEFAULT_FEATURE_BULK_BATCH_SIZE = 25
+DEFAULT_MAX_BATCH_BYTES = 1_048_576  # 1 MiB
+DEFAULT_MAX_GEOMETRY_BYTES = 512 * 1024
+
+
+def _feature_insert_bytes(feature: MapFeature) -> int:
+    geom = json.dumps(feature.geometry, separators=(",", ":"))
+    props = json.dumps(feature.properties, separators=(",", ":"))
+    return len(geom) + len(props) + len(feature.label or "")
+
+
+def _bulk_create_chunk(features: list[MapFeature]) -> None:
+    if not features:
+        return
+    try:
+        MapFeature.objects.bulk_create(features)
+    except OperationalError as exc:
+        if "max_allowed_packet" not in str(exc).lower() or len(features) <= 1:
+            raise
+        mid = len(features) // 2
+        _bulk_create_chunk(features[:mid])
+        _bulk_create_chunk(features[mid:])
+
+
+def _bulk_create_features(features: list[MapFeature]) -> None:
+    """Insert features in size-limited batches to stay under MySQL max_allowed_packet."""
+    if not features:
+        return
+    max_count = max(1, int(getattr(settings, "MAP_FEATURE_BULK_BATCH_SIZE", DEFAULT_FEATURE_BULK_BATCH_SIZE)))
+    max_bytes = int(getattr(settings, "MAP_FEATURE_MAX_BATCH_BYTES", DEFAULT_MAX_BATCH_BYTES))
+    batch: list[MapFeature] = []
+    batch_bytes = 0
+    for feature in features:
+        nbytes = _feature_insert_bytes(feature)
+        if batch and (len(batch) >= max_count or batch_bytes + nbytes > max_bytes):
+            _bulk_create_chunk(batch)
+            batch = []
+            batch_bytes = 0
+        batch.append(feature)
+        batch_bytes += nbytes
+    if batch:
+        _bulk_create_chunk(batch)
+
+
+def _prepare_geometry(geometry: dict, layer: MapLayer) -> dict:
+    if layer.layer_type != MapLayer.LayerType.POLYGON:
+        return geometry
+    gtype = geometry.get("type", "")
+    if gtype not in ("Polygon", "MultiPolygon"):
+        return geometry
+    max_geom_bytes = int(getattr(settings, "MAP_FEATURE_MAX_GEOMETRY_BYTES", DEFAULT_MAX_GEOMETRY_BYTES))
+    if len(json.dumps(geometry, separators=(",", ":"))) <= max_geom_bytes:
+        return geometry
+    from apps.geography.admin_boundary_service import simplify_geometry
+
+    simplified = simplify_geometry(geometry, tolerance_deg=0.01)
+    if len(json.dumps(simplified, separators=(",", ":"))) > max_geom_bytes:
+        simplified = simplify_geometry(geometry, tolerance_deg=0.05)
+    return simplified
 
 
 def import_features_for_layer(layer: MapLayer, features_data: list, source: str = "import") -> int:
     """Replace active features on a layer with parsed GeoJSON features."""
     new_features = []
     for feat in features_data:
-        geom = feat.get("geometry", {})
+        geom = _prepare_geometry(feat.get("geometry", {}), layer)
         props = feat.get("properties", {}) or {}
         lat, lng = _extract_point_coords(geom)
         new_features.append(
@@ -23,10 +85,10 @@ def import_features_for_layer(layer: MapLayer, features_data: list, source: str 
                 properties=props,
                 latitude=lat,
                 longitude=lng,
-                label=props.get("name", props.get("label", "")),
+                label=str(props.get("name", props.get("label", "")))[:255],
             )
         )
-    MapFeature.objects.bulk_create(new_features)
+    _bulk_create_features(new_features)
     return len(new_features)
 
 
@@ -66,6 +128,17 @@ def process_layer_upload(upload_id):
 
         upload.status = LayerUpload.Status.COMPLETED
         upload.save(update_fields=["status"])
+    except OperationalError as exc:
+        upload.status = LayerUpload.Status.FAILED
+        if "max_allowed_packet" in str(exc).lower():
+            upload.error_message = (
+                "Import failed: feature batch is too large for the database. "
+                "Try simplifying geometries, splitting the layer, or increasing MySQL max_allowed_packet."
+            )
+        else:
+            upload.error_message = str(exc)
+        upload.save(update_fields=["status", "error_message"])
+        raise
     except Exception as exc:
         upload.status = LayerUpload.Status.FAILED
         upload.error_message = str(exc)

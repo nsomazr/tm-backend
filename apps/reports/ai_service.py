@@ -10,7 +10,7 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
-    "You are a senior geological analyst for Terra Meta (Tanzania mineral intelligence). "
+    "You are a senior geological analyst for Terra Meta, a mineral intelligence platform. "
     "Write a comprehensive but readable prospectivity report summary (4–6 short paragraphs) "
     "covering geological setting, mineral potential, exploration implications, and regional context. "
     "End with a 'Key findings:' section and 4–6 bullet points (each starting with '- '). "
@@ -18,7 +18,7 @@ SYSTEM_PROMPT = (
 )
 
 MAP_INSIGHT_PROMPT = (
-    "You are Terra Assistant for Terra Meta, a Tanzania mineral intelligence platform. "
+    "You are Terra Assistant for Terra Meta, a mineral intelligence platform. "
     "Using ONLY the mapped data in the user message, write 2–4 short paragraphs in natural, "
     "conversational prose for explorers and investors. "
     "Weave minerals, regions, and context into flowing sentences. Do not use bullet lists. "
@@ -29,19 +29,32 @@ MAP_INSIGHT_PROMPT = (
 )
 
 ASSISTANT_CHAT_PROMPT = (
-    "You are Terra Assistant for Terra Meta, Tanzania mineral intelligence. "
+    "You are Terra, a friendly assistant for Terra Meta, a mineral intelligence platform. "
     "Answer using ONLY the context and conversation provided. "
-    "Write in natural conversational prose: short paragraphs, not bullet lists. "
-    "Keep replies concise (usually 2–5 sentences; up to two short paragraphs if needed). "
-    "Only use a brief list if the user explicitly asks for one or you must compare 4+ distinct items. "
-    "Use **bold** sparingly for key terms. "
-    "If data is missing, say so clearly. Do not invent geology or locations not in the context."
+    "Match the user's tone and length: one short sentence for greetings, thanks, or okay; "
+    "more detail only when they ask a real question. "
+    "Write in natural conversational prose, not marketing copy or bullet lists. "
+    "Do not repeat facts you or the user already stated in this thread. "
+    "Use **bold** sparingly. If data is missing, say so. Do not invent geology or locations."
+)
+
+PLATFORM_ASSISTANT_CHAT_PROMPT = (
+    "You are Terra, a friendly guide to Terra Meta, a mineral intelligence platform. "
+    "The user is on a free plan. Have a natural back-and-forth conversation. "
+    "Match their tone and length: reply in one brief, warm sentence to hi, okay, thanks, or bye. "
+    "Do NOT give an unprompted platform overview, feature list, or mineral catalogue. "
+    "Only explain what Terra Meta does, pricing, or subscriptions when they clearly ask "
+    "(e.g. what is this, how does it work, what do I get if I subscribe). "
+    "If they want map or location insights, say briefly that subscribing unlocks those, "
+    "without re-explaining the whole product. "
+    "Never describe coordinates, regions at a click, or site-specific geology. "
+    "Do not repeat information already said in this conversation."
 )
 
 REPORT_WRITING_PROMPT = (
-    "You are Terra Meta's report writing assistant for Tanzania mineral prospectivity reports. "
+    "You are Terra Meta's report writing assistant for mineral prospectivity reports. "
     "Draft publication-ready content using ONLY the report metadata and reference context provided. "
-    "Write for investors, explorers, and policymakers. Be specific to Tanzania and the commodity named. "
+    "Write for investors, explorers, and policymakers. Be specific to the country and commodity named. "
     "Do not invent drill results, reserves, or licenses not supported by the context. "
     "If context is thin, write cautious, clearly scoped geological narrative and note data limitations. "
     "Respond with valid JSON only (no markdown code fences). Schema:\n"
@@ -103,14 +116,23 @@ def generate_map_insight(context: str) -> tuple[str, str]:
 def generate_assistant_chat(
     messages: list[dict[str, str]],
     context: str,
+    *,
+    platform_only: bool = False,
 ) -> tuple[str, str]:
     """Multi-turn Terra Assistant reply. messages: [{role, content}, ...]."""
+    system_prompt = PLATFORM_ASSISTANT_CHAT_PROMPT if platform_only else ASSISTANT_CHAT_PROMPT
     providers = _provider_chain()
     errors = []
 
     for provider in providers:
         try:
-            text = _call_chat_provider(provider, messages, context)
+            text = _call_chat_provider(
+                provider,
+                messages,
+                context,
+                system_prompt=system_prompt,
+                platform_only=platform_only,
+            )
             if text and text.strip():
                 return sanitize_assistant_output(text.strip()), _model_label(provider)
         except Exception as exc:
@@ -192,7 +214,7 @@ def _build_report_writing_user_payload(
         "Report metadata:",
         f"Title: {metadata.get('title') or 'Untitled'}",
         f"Mineral: {metadata.get('mineral_name') or 'Unknown'}",
-        f"Region: {metadata.get('region_name') or 'Tanzania (national)'}",
+        f"Region: {metadata.get('region_name') or 'National'}",
         f"Overview: {metadata.get('description') or '(none)'}",
     ]
     if current_draft:
@@ -337,7 +359,7 @@ def _call_provider(provider: str, context: str) -> str:
 
 
 def _call_map_provider(provider: str, context: str) -> str:
-    user_msg = f"Mapped data for this map click in Tanzania:\n\n{context}"
+    user_msg = f"Mapped data for this map click:\n\n{context}"
     if provider == "ollama":
         return _ollama_custom(user_msg, MAP_INSIGHT_PROMPT)
     if provider == "groq":
@@ -351,13 +373,22 @@ def _call_chat_provider(
     provider: str,
     messages: list[dict[str, str]],
     context: str,
+    *,
+    system_prompt: str = ASSISTANT_CHAT_PROMPT,
+    platform_only: bool = False,
 ) -> str:
-    chat_messages = [{"role": "system", "content": ASSISTANT_CHAT_PROMPT}]
+    chat_messages = [{"role": "system", "content": system_prompt}]
     if context.strip():
+        context_prefix = (
+            "Background facts (use only when the user's question needs them; "
+            "never recite this unprompted):\n"
+            if platform_only
+            else "Reference context (use only this data):\n"
+        )
         chat_messages.append(
             {
                 "role": "system",
-                "content": f"Reference context (use only this data):\n{context.strip()}",
+                "content": f"{context_prefix}{context.strip()}",
             }
         )
     for item in messages:
@@ -470,21 +501,21 @@ def _fallback_region_line(context: str) -> str:
     try:
         region = context.split("Administrative region at click:")[1].split("\n")[0].strip()
         if region:
-            return f"This area is in {region}, Tanzania."
+            return f"This area is in {region}."
     except (IndexError, AttributeError):
         pass
     try:
         region = context.split("Mapped zone region")[1].split("\n")[0].strip()
         if region:
-            return f"This area is in {region}, Tanzania."
+            return f"This area is in {region}."
     except (IndexError, AttributeError):
         pass
-    return "This area is in Tanzania."
+    return "Location details are available on the map for this area."
 
 
 def _fallback_mineral_line(context: str) -> str:
     try:
         mineral = context.split("Mineral:")[1].split("\n")[0].strip()
-        return f"This report covers {mineral} prospectivity in Tanzania."
+        return f"This report covers {mineral} prospectivity."
     except (IndexError, AttributeError):
-        return "This report covers mineral prospectivity in Tanzania."
+        return "This report covers mineral prospectivity."

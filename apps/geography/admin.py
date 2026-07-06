@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Country, Region
+from .models import AdminBoundary, Country, Region
 
 
 class RegionInline(admin.TabularInline):
@@ -18,3 +18,10 @@ class CountryAdmin(admin.ModelAdmin):
 class RegionAdmin(admin.ModelAdmin):
     list_display = ("name", "country", "is_active")
     list_filter = ("country",)
+
+
+@admin.register(AdminBoundary)
+class AdminBoundaryAdmin(admin.ModelAdmin):
+    list_display = ("name", "country", "level", "source", "updated_at")
+    list_filter = ("country", "level", "source")
+    search_fields = ("name", "code")

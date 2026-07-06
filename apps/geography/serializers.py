@@ -6,7 +6,17 @@ from .models import Country, Region
 class CountrySerializer(serializers.ModelSerializer):
     class Meta:
         model = Country
-        fields = ("id", "code", "name", "name_sw", "is_active")
+        fields = (
+            "id",
+            "code",
+            "name",
+            "name_sw",
+            "center_lat",
+            "center_lng",
+            "default_zoom",
+            "bounds",
+            "is_active",
+        )
 
 
 class RegionSerializer(serializers.ModelSerializer):

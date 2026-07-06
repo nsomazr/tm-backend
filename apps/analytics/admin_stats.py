@@ -13,6 +13,8 @@ from apps.payments.models import PaymentOrder
 from apps.reports.models import Report
 from apps.subscriptions.models import DownloadPurchase, UserSubscription
 
+from .coverage_stats import build_hotspots_by_region, build_layer_inventory
+
 
 def _monthly_trend(qs, date_field, months=6):
     cutoff = timezone.now() - timedelta(days=months * 31)
@@ -157,26 +159,18 @@ def build_admin_platform_analytics():
         .values("layer_type")
         .annotate(count=Count("id"))
     )
-    regions_covered = (
-        MapLayer.objects.filter(is_active=True, region__isnull=False)
-        .values("region")
-        .distinct()
-        .count()
-    )
-    hotspots_by_region = list(
-        active_features.values("layer__region__name")
-        .annotate(count=Count("id"))
-        .order_by("-count")[:10]
-    )
-    hotspots_by_region = [
-        {"region": row["layer__region__name"] or "Unknown", "count": row["count"]}
-        for row in hotspots_by_region
-    ]
+    hotspots_by_region = build_hotspots_by_region(active_features)
+    layers_inventory = build_layer_inventory()
+    regions_covered = len([r for r in hotspots_by_region if r["region"] != "Unknown"])
 
     minerals = list(
         Mineral.objects.filter(is_active=True)
         .annotate(
-            layer_count=Count("layers", filter=Q(layers__is_active=True), distinct=True),
+            layer_count=Count(
+                "layers",
+                filter=Q(layers__is_active=True, layers__features__is_active=True),
+                distinct=True,
+            ),
             feature_count=Count(
                 "layers__features",
                 filter=Q(layers__features__is_active=True, layers__is_active=True),
@@ -259,6 +253,7 @@ def build_admin_platform_analytics():
             "regions_covered": regions_covered,
             "layer_by_type": layer_by_type,
             "hotspots_by_region": hotspots_by_region,
+            "layers": layers_inventory,
             "minerals": minerals,
         },
         "licenses": license_counts,

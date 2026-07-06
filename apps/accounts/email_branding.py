@@ -76,7 +76,7 @@ def email_layout_html(*, title: str, heading: str, body_html: str) -> str:
               <p style="margin:0;font-size:12px;color:#64748b;line-height:1.6;">
                 <strong style="color:#1e3a2f;">Terra Meta</strong> by
                 <a href="https://5ggeology.com" style="color:#2d5a47;text-decoration:none;font-weight:600;">5G Geology</a><br />
-                Mineral intelligence for Tanzania
+                Mineral intelligence platform
               </p>
             </td>
           </tr>

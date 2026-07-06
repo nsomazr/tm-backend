@@ -8,6 +8,7 @@ class AssistantCreditUsage(models.Model):
     class Kind(models.TextChoices):
         MAP_INSIGHT = "map_insight", "Map insight"
         CHAT = "chat", "Chat message"
+        REPORT_EXPORT = "report_export", "Insight report export"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -62,3 +63,45 @@ class AssistantChatThread(models.Model):
 
     def __str__(self):
         return f"{self.user_id} · {self.thread_key} · {len(self.messages or [])} msgs"
+
+
+class AerialAnalysisGrant(models.Model):
+    """Paid extension to analyse map areas larger than the included km² allowance."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="aerial_grants",
+    )
+    payment_order = models.ForeignKey(
+        "payments.PaymentOrder",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="aerial_grants",
+    )
+    lat = models.FloatField()
+    lng = models.FloatField()
+    zoom = models.PositiveSmallIntegerField(default=8)
+    max_area_km2 = models.FloatField()
+    purchased_extra_km2 = models.FloatField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def covers_click(self, lat: float, lng: float) -> bool:
+        if not self.is_active:
+            return False
+        from .map_view_area import point_in_analysis_zone
+
+        return point_in_analysis_zone(lat, lng, self.lat, self.lng, self.max_area_km2)
+
+    def covers(self, lat: float, lng: float, zoom: int, area_km2: float) -> bool:
+        if not self.covers_click(lat, lng):
+            return False
+        return area_km2 <= self.max_area_km2
+
+    def __str__(self):
+        return f"{self.user_id} · {self.max_area_km2} km² @ {self.lat:.2f},{self.lng:.2f}"
