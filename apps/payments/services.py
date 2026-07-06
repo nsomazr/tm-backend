@@ -10,7 +10,9 @@ from reportlab.pdfgen import canvas
 
 from django.conf import settings
 
+from apps.accounts.models import User
 from apps.analytics.models import AerialAnalysisGrant
+from apps.subscriptions.models import DownloadPurchase, UserSubscription
 
 from .models import Invoice, PaymentOrder
 from .snippe import (
