@@ -307,98 +307,216 @@ def import_features_for_country(
         if source == AdminBoundary.Source.ADMIN_UPLOAD:
             AdminBoundary.objects.filter(country=country, level=level).delete()
 
-    parent_by_code: dict[str, AdminBoundary] = {}
-    if level == 1:
-        parent_by_code = {
-            b.code: b
-            for b in AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.COUNTRY)
-        }
-    elif level == 2:
-        parent_by_code = {
-            b.code: b
-            for b in AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.REGION)
-        }
-    elif level == 3:
-        parent_by_code = {
-            b.code: b
-            for b in AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.DISTRICT)
-        }
-    elif level == 4:
-        parent_by_code = {
-            b.code: b
-            for b in AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.WARD)
-        }
+        parent_by_code: dict[str, AdminBoundary] = {}
+        if level == 1:
+            parent_by_code = {
+                b.code: b
+                for b in AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.COUNTRY)
+            }
+        elif level == 2:
+            parent_by_code = {
+                b.code: b
+                for b in AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.REGION)
+            }
+        elif level == 3:
+            parent_by_code = {
+                b.code: b
+                for b in AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.DISTRICT)
+            }
+        elif level == 4:
+            parent_by_code = {
+                b.code: b
+                for b in AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.WARD)
+            }
 
-    region_parents: list[AdminBoundary] = []
-    region_by_name: dict[str, AdminBoundary] = {}
-    parent_by_name: dict[str, AdminBoundary] = {}
-    if level == 2:
-        region_parents = list(
-            AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.REGION)
-        )
-        region_by_name = {b.name.lower(): b for b in region_parents}
-    elif level == 3:
-        parents = AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.DISTRICT)
-        parent_by_name = {b.name.lower(): b for b in parents}
-    elif level == 4:
-        parents = AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.WARD)
-        parent_by_name = {b.name.lower(): b for b in parents}
+        region_parents: list[AdminBoundary] = []
+        region_by_name: dict[str, AdminBoundary] = {}
+        parent_by_name: dict[str, AdminBoundary] = {}
+        if level == 2:
+            region_parents = list(
+                AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.REGION)
+            )
+            region_by_name = {b.name.lower(): b for b in region_parents}
+        elif level == 3:
+            parents = AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.DISTRICT)
+            parent_by_name = {b.name.lower(): b for b in parents}
+        elif level == 4:
+            parents = AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.WARD)
+            parent_by_name = {b.name.lower(): b for b in parents}
 
-    total = len(features)
-    count = 0
-    for index, feat in enumerate(features, start=1):
-        geom = feat.get("geometry")
-        if not geom or geom.get("type") not in ("Polygon", "MultiPolygon"):
+        total = len(features)
+        boundaries_by_code: dict[str, AdminBoundary] = {}
+        for index, feat in enumerate(features, start=1):
+            geom = feat.get("geometry")
+            if not geom or geom.get("type") not in ("Polygon", "MultiPolygon"):
+                if progress_cb and (index % 50 == 0 or index == total):
+                    progress_cb(index, total)
+                continue
+            geom = ensure_wgs84_geometry(geom) or geom
+            props = feat.get("properties") or {}
+            name, code = _extract_name_code(props, level)
+            if not code:
+                if progress_cb and (index % 50 == 0 or index == total):
+                    progress_cb(index, total)
+                continue
+
+            parent = None
+            region = None
+            if level == 1:
+                parent_code = props.get("GID_0") or country.code
+                parent = parent_by_code.get(str(parent_code))
+            elif level == 2:
+                parent_key = _parent_lookup_key(props, 2)
+                parent = parent_by_code.get(parent_key)
+                if not parent and props.get("NAME_1"):
+                    parent = region_by_name.get(str(props["NAME_1"]).lower())
+                if not parent and props.get("Region_Nam"):
+                    parent = region_by_name.get(str(props["Region_Nam"]).lower())
+                if not parent:
+                    lat, lng = _geometry_centroid(geom)
+                    for region in region_parents:
+                        if point_in_geometry(lng, lat, region.geometry):
+                            parent = region
+                            break
+            elif level == 3:
+                parent_key = _parent_lookup_key(props, 3)
+                parent = parent_by_code.get(parent_key)
+                if not parent and props.get("NAME_2"):
+                    parent = parent_by_name.get(str(props["NAME_2"]).lower())
+                if not parent and props.get("District_N"):
+                    parent = parent_by_name.get(str(props["District_N"]).lower())
+            elif level == 4:
+                parent_key = _parent_lookup_key(props, 4)
+                parent = parent_by_code.get(parent_key)
+                if not parent and props.get("NAME_3"):
+                    parent = parent_by_name.get(str(props["NAME_3"]).lower())
+                if not parent and props.get("Ward_Name"):
+                    parent = parent_by_name.get(str(props["Ward_Name"]).lower())
+
+            if level == 1:
+                region = None
+            elif level == 2:
+                region = parent
+            elif level in (3, 4):
+                region = parent.region if parent else None
+
+            lat, lng = _geometry_centroid(geom)
+            boundary = AdminBoundary(
+                country=country,
+                level=level,
+                name=name,
+                name_sw=str(props.get("name_sw") or name),
+                code=code,
+                geometry=simplify_geometry(geom, tolerance_deg=0.02 if level == 2 else 0.015),
+                source=source,
+                parent=parent,
+                region=region,
+                center_lat=lat,
+                center_lng=lng,
+            )
+            boundaries_by_code[code] = boundary
             if progress_cb and (index % 50 == 0 or index == total):
                 progress_cb(index, total)
-            continue
-        geom = ensure_wgs84_geometry(geom) or geom
-        props = feat.get("properties") or {}
-        name, code = _extract_name_code(props, level)
-        parent = None
-        if level == 1:
-            parent_code = props.get("GID_0") or country.code
-            parent = parent_by_code.get(str(parent_code))
-        elif level == 2:
-            parent_key = _parent_lookup_key(props, 2)
-            parent = parent_by_code.get(parent_key)
-            if not parent and props.get("NAME_1"):
-                parent = region_by_name.get(str(props["NAME_1"]).lower())
-            if not parent and props.get("Region_Nam"):
-                parent = region_by_name.get(str(props["Region_Nam"]).lower())
-            if not parent:
-                lat, lng = _geometry_centroid(geom)
-                for region in region_parents:
-                    if point_in_geometry(lng, lat, region.geometry):
-                        parent = region
-                        break
-        elif level == 3:
-            parent_key = _parent_lookup_key(props, 3)
-            parent = parent_by_code.get(parent_key)
-            if not parent and props.get("NAME_2"):
-                parent = parent_by_name.get(str(props["NAME_2"]).lower())
-            if not parent and props.get("District_N"):
-                parent = parent_by_name.get(str(props["District_N"]).lower())
-        elif level == 4:
-            parent_key = _parent_lookup_key(props, 4)
-            parent = parent_by_code.get(parent_key)
-            if not parent and props.get("NAME_3"):
-                parent = parent_by_name.get(str(props["NAME_3"]).lower())
-            if not parent and props.get("Ward_Name"):
-                parent = parent_by_name.get(str(props["Ward_Name"]).lower())
 
-        _upsert_boundary(
-            country=country,
-            level=level,
-            name=name,
-            code=code,
-            geometry=geom,
-            source=source,
-            parent=parent,
-        )
-        count += 1
-        if progress_cb and (index % 50 == 0 or index == total):
-            progress_cb(index, total)
+        if boundaries_by_code:
+            AdminBoundary.objects.bulk_create(
+                list(boundaries_by_code.values()),
+                batch_size=500,
+            )
+        count = len(boundaries_by_code)
+    else:
+        parent_by_code: dict[str, AdminBoundary] = {}
+        if level == 1:
+            parent_by_code = {
+                b.code: b
+                for b in AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.COUNTRY)
+            }
+        elif level == 2:
+            parent_by_code = {
+                b.code: b
+                for b in AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.REGION)
+            }
+        elif level == 3:
+            parent_by_code = {
+                b.code: b
+                for b in AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.DISTRICT)
+            }
+        elif level == 4:
+            parent_by_code = {
+                b.code: b
+                for b in AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.WARD)
+            }
+
+        region_parents: list[AdminBoundary] = []
+        region_by_name: dict[str, AdminBoundary] = {}
+        parent_by_name: dict[str, AdminBoundary] = {}
+        if level == 2:
+            region_parents = list(
+                AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.REGION)
+            )
+            region_by_name = {b.name.lower(): b for b in region_parents}
+        elif level == 3:
+            parents = AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.DISTRICT)
+            parent_by_name = {b.name.lower(): b for b in parents}
+        elif level == 4:
+            parents = AdminBoundary.objects.filter(country=country, level=AdminBoundary.Level.WARD)
+            parent_by_name = {b.name.lower(): b for b in parents}
+
+        total = len(features)
+        count = 0
+        for index, feat in enumerate(features, start=1):
+            geom = feat.get("geometry")
+            if not geom or geom.get("type") not in ("Polygon", "MultiPolygon"):
+                if progress_cb and (index % 50 == 0 or index == total):
+                    progress_cb(index, total)
+                continue
+            geom = ensure_wgs84_geometry(geom) or geom
+            props = feat.get("properties") or {}
+            name, code = _extract_name_code(props, level)
+            parent = None
+            if level == 1:
+                parent_code = props.get("GID_0") or country.code
+                parent = parent_by_code.get(str(parent_code))
+            elif level == 2:
+                parent_key = _parent_lookup_key(props, 2)
+                parent = parent_by_code.get(parent_key)
+                if not parent and props.get("NAME_1"):
+                    parent = region_by_name.get(str(props["NAME_1"]).lower())
+                if not parent and props.get("Region_Nam"):
+                    parent = region_by_name.get(str(props["Region_Nam"]).lower())
+                if not parent:
+                    lat, lng = _geometry_centroid(geom)
+                    for region in region_parents:
+                        if point_in_geometry(lng, lat, region.geometry):
+                            parent = region
+                            break
+            elif level == 3:
+                parent_key = _parent_lookup_key(props, 3)
+                parent = parent_by_code.get(parent_key)
+                if not parent and props.get("NAME_2"):
+                    parent = parent_by_name.get(str(props["NAME_2"]).lower())
+                if not parent and props.get("District_N"):
+                    parent = parent_by_name.get(str(props["District_N"]).lower())
+            elif level == 4:
+                parent_key = _parent_lookup_key(props, 4)
+                parent = parent_by_code.get(parent_key)
+                if not parent and props.get("NAME_3"):
+                    parent = parent_by_name.get(str(props["NAME_3"]).lower())
+                if not parent and props.get("Ward_Name"):
+                    parent = parent_by_name.get(str(props["Ward_Name"]).lower())
+
+            _upsert_boundary(
+                country=country,
+                level=level,
+                name=name,
+                code=code,
+                geometry=geom,
+                source=source,
+                parent=parent,
+            )
+            count += 1
+            if progress_cb and (index % 50 == 0 or index == total):
+                progress_cb(index, total)
 
     if level == 0 and count:
         adm0 = AdminBoundary.objects.filter(country=country, level=0).first()
