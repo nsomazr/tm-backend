@@ -173,6 +173,70 @@ def _region_key_from_props(props: dict[str, Any]) -> str:
     return ""
 
 
+def _enrich_props_with_parent(
+    props: dict[str, Any],
+    level: int,
+    parent: AdminBoundary | None,
+) -> dict[str, Any]:
+    """Add parent admin codes when shapefile rows omit region/district columns."""
+    enriched = dict(props or {})
+    if not parent:
+        return enriched
+    if level == 2 and not _region_key_from_props(props):
+        enriched.setdefault("Region_Cod", parent.code)
+        enriched.setdefault("Region_Nam", parent.name)
+    if level == 3 and not props.get("District_C") and not props.get("NAME_2"):
+        enriched.setdefault("District_C", parent.code)
+        enriched.setdefault("District_N", parent.name)
+    return enriched
+
+
+def _resolve_import_parent(
+    *,
+    country: Country,
+    level: int,
+    props: dict[str, Any],
+    geom: dict[str, Any],
+    parent_by_code: dict[str, AdminBoundary],
+    region_by_name: dict[str, AdminBoundary],
+    region_parents: list[AdminBoundary],
+    parent_by_name: dict[str, AdminBoundary],
+) -> AdminBoundary | None:
+    if level == 1:
+        parent_code = props.get("GID_0") or country.code
+        return parent_by_code.get(str(parent_code))
+    if level == 2:
+        parent_key = _parent_lookup_key(props, 2)
+        parent = parent_by_code.get(parent_key)
+        if not parent and props.get("NAME_1"):
+            parent = region_by_name.get(str(props["NAME_1"]).lower())
+        if not parent and props.get("Region_Nam"):
+            parent = region_by_name.get(str(props["Region_Nam"]).lower())
+        if not parent:
+            lat, lng = _geometry_centroid(geom)
+            for region in region_parents:
+                if point_in_geometry(lng, lat, region.geometry):
+                    return region
+        return parent
+    if level == 3:
+        parent_key = _parent_lookup_key(props, 3)
+        parent = parent_by_code.get(parent_key)
+        if not parent and props.get("NAME_2"):
+            parent = parent_by_name.get(str(props["NAME_2"]).lower())
+        if not parent and props.get("District_N"):
+            parent = parent_by_name.get(str(props["District_N"]).lower())
+        return parent
+    if level == 4:
+        parent_key = _parent_lookup_key(props, 4)
+        parent = parent_by_code.get(parent_key)
+        if not parent and props.get("NAME_3"):
+            parent = parent_by_name.get(str(props["NAME_3"]).lower())
+        if not parent and props.get("Ward_Name"):
+            parent = parent_by_name.get(str(props["Ward_Name"]).lower())
+        return parent
+    return None
+
+
 def _extract_name_code(props: dict[str, Any], level: int) -> tuple[str, str]:
     props = props or {}
     if level == 0:
@@ -383,45 +447,24 @@ def import_features_for_country(
                 continue
             geom = ensure_wgs84_geometry(geom) or geom
             props = feat.get("properties") or {}
-            name, code = _extract_name_code(props, level)
+            parent = _resolve_import_parent(
+                country=country,
+                level=level,
+                props=props,
+                geom=geom,
+                parent_by_code=parent_by_code,
+                region_by_name=region_by_name,
+                region_parents=region_parents,
+                parent_by_name=parent_by_name,
+            )
+            code_props = _enrich_props_with_parent(props, level, parent)
+            name, code = _extract_name_code(code_props, level)
             if not code:
                 if progress_cb and (index % 50 == 0 or index == total):
                     progress_cb(index, total)
                 continue
 
-            parent = None
             region = None
-            if level == 1:
-                parent_code = props.get("GID_0") or country.code
-                parent = parent_by_code.get(str(parent_code))
-            elif level == 2:
-                parent_key = _parent_lookup_key(props, 2)
-                parent = parent_by_code.get(parent_key)
-                if not parent and props.get("NAME_1"):
-                    parent = region_by_name.get(str(props["NAME_1"]).lower())
-                if not parent and props.get("Region_Nam"):
-                    parent = region_by_name.get(str(props["Region_Nam"]).lower())
-                if not parent:
-                    lat, lng = _geometry_centroid(geom)
-                    for region in region_parents:
-                        if point_in_geometry(lng, lat, region.geometry):
-                            parent = region
-                            break
-            elif level == 3:
-                parent_key = _parent_lookup_key(props, 3)
-                parent = parent_by_code.get(parent_key)
-                if not parent and props.get("NAME_2"):
-                    parent = parent_by_name.get(str(props["NAME_2"]).lower())
-                if not parent and props.get("District_N"):
-                    parent = parent_by_name.get(str(props["District_N"]).lower())
-            elif level == 4:
-                parent_key = _parent_lookup_key(props, 4)
-                parent = parent_by_code.get(parent_key)
-                if not parent and props.get("NAME_3"):
-                    parent = parent_by_name.get(str(props["NAME_3"]).lower())
-                if not parent and props.get("Ward_Name"):
-                    parent = parent_by_name.get(str(props["Ward_Name"]).lower())
-
             if level == 1:
                 region = None
             elif level == 2:
@@ -501,39 +544,18 @@ def import_features_for_country(
                 continue
             geom = ensure_wgs84_geometry(geom) or geom
             props = feat.get("properties") or {}
-            name, code = _extract_name_code(props, level)
-            parent = None
-            if level == 1:
-                parent_code = props.get("GID_0") or country.code
-                parent = parent_by_code.get(str(parent_code))
-            elif level == 2:
-                parent_key = _parent_lookup_key(props, 2)
-                parent = parent_by_code.get(parent_key)
-                if not parent and props.get("NAME_1"):
-                    parent = region_by_name.get(str(props["NAME_1"]).lower())
-                if not parent and props.get("Region_Nam"):
-                    parent = region_by_name.get(str(props["Region_Nam"]).lower())
-                if not parent:
-                    lat, lng = _geometry_centroid(geom)
-                    for region in region_parents:
-                        if point_in_geometry(lng, lat, region.geometry):
-                            parent = region
-                            break
-            elif level == 3:
-                parent_key = _parent_lookup_key(props, 3)
-                parent = parent_by_code.get(parent_key)
-                if not parent and props.get("NAME_2"):
-                    parent = parent_by_name.get(str(props["NAME_2"]).lower())
-                if not parent and props.get("District_N"):
-                    parent = parent_by_name.get(str(props["District_N"]).lower())
-            elif level == 4:
-                parent_key = _parent_lookup_key(props, 4)
-                parent = parent_by_code.get(parent_key)
-                if not parent and props.get("NAME_3"):
-                    parent = parent_by_name.get(str(props["NAME_3"]).lower())
-                if not parent and props.get("Ward_Name"):
-                    parent = parent_by_name.get(str(props["Ward_Name"]).lower())
-
+            parent = _resolve_import_parent(
+                country=country,
+                level=level,
+                props=props,
+                geom=geom,
+                parent_by_code=parent_by_code,
+                region_by_name=region_by_name,
+                region_parents=region_parents,
+                parent_by_name=parent_by_name,
+            )
+            code_props = _enrich_props_with_parent(props, level, parent)
+            name, code = _extract_name_code(code_props, level)
             _upsert_boundary(
                 country=country,
                 level=level,

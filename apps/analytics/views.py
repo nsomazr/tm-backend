@@ -228,7 +228,14 @@ class MineralHeatmapView(PublicCatalogThrottleMixin, APIView):
             locale=locale,
         )
         if not payload:
-            return Response({"detail": "Mineral not found."}, status=404)
+            return Response(
+                {
+                    "detail": "No heatmap for the selected layer(s).",
+                    "layer_ids": layer_ids,
+                    "mineral_slug": slug,
+                },
+                status=404,
+            )
         payload["exploration_quota"] = quota
         return Response(payload)
 

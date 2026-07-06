@@ -6,13 +6,11 @@ import math
 from typing import Any
 
 from apps.geography.admin_boundary_service import _geometry_centroid
-from apps.geography.models import Country
 from apps.maps.geometry_utils import geometry_area_km2, haversine_km
 from apps.maps.layer_defaults import GENERAL_MINERAL_SLUG
 from apps.maps.models import MapFeature, MapLayer
 
 from .insights import _accessible_features
-from .mineral_coverage import PERIODIC_LAYER_SLUGS
 from .spatial_assign import feature_sample_point, layer_display_color
 
 MAX_HEATMAP_FEATURES = 5000
@@ -112,30 +110,19 @@ def heatmap_samples_for_feature(feature: MapFeature) -> list[tuple[float, float,
     return []
 
 
-def _layers_for_heatmap(
-    mineral_slug: str,
-    layers: list[MapLayer],
-    layer_ids: list[int],
-) -> list[MapLayer]:
-    """Resolve checked map layers; all ids must belong to one non-general mineral."""
+def _layers_for_heatmap(layer_ids: list[int]) -> list[MapLayer]:
+    """Resolve explicitly checked layers; all ids must belong to one mineral."""
     if not layer_ids:
         return []
     id_set = set(layer_ids)
-    matched = [layer for layer in layers if layer.id in id_set]
+    matched = list(
+        MapLayer.objects.filter(is_active=True, id__in=id_set).select_related("mineral")
+    )
     if not matched:
         return []
     mineral_slugs = {layer.mineral.slug for layer in matched}
     if len(mineral_slugs) != 1:
         return []
-    only_slug = next(iter(mineral_slugs))
-    if only_slug == GENERAL_MINERAL_SLUG:
-        return []
-    # URL slug may be a catalog alias; layer ids are authoritative once validated above.
-    slug_candidates = set(PERIODIC_LAYER_SLUGS.get(mineral_slug, [mineral_slug, only_slug]))
-    if mineral_slug not in slug_candidates and only_slug not in slug_candidates:
-        layer_slugs = {layer.slug for layer in matched}
-        if not slug_candidates.intersection(layer_slugs):
-            return []
     return matched
 
 
@@ -159,24 +146,22 @@ def build_mineral_heatmap(
     from apps.maps.localization import localized_name
 
     mineral_slug = (mineral_slug or "").strip()
-    if not mineral_slug or mineral_slug == GENERAL_MINERAL_SLUG:
-        return None
     if not layer_ids:
         return None
 
-    country = Country.objects.filter(code=country_code.upper()).first()
-    if not country:
-        return None
-
-    layers = list(
-        MapLayer.objects.filter(is_active=True, mineral__country=country).select_related("mineral")
-    )
-    mineral_layers = _layers_for_heatmap(mineral_slug, layers, layer_ids)
+    mineral_layers = _layers_for_heatmap(layer_ids)
     if not mineral_layers:
         return None
 
+    only_mineral_slug = next(iter({layer.mineral.slug for layer in mineral_layers}))
+    if mineral_slug == GENERAL_MINERAL_SLUG and only_mineral_slug != GENERAL_MINERAL_SLUG:
+        return None
+
     color = _heatmap_display_color(mineral_layers)
-    slug = mineral_slug
+    if only_mineral_slug == GENERAL_MINERAL_SLUG:
+        slug = mineral_layers[0].slug
+    else:
+        slug = only_mineral_slug
     display_name = localized_name(mineral_layers[0], locale)
     features = []
     remaining = max_features
