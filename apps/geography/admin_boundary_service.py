@@ -15,7 +15,7 @@ from apps.maps.geometry_utils import geometry_bbox, point_in_geometry
 from apps.maps.crs_utils import ensure_wgs84_geometry
 from apps.maps.upload_security import friendly_upload_error
 
-from .country_geo import preset_for_code
+from .country_geo import bounds_look_valid_for_country, preset_for_code
 from .models import AdminBoundary, Country, Region
 from .region_geo import REGION_CENTERS, region_bounds
 
@@ -525,12 +525,14 @@ def import_features_for_country(
             bbox = geometry_bbox(adm0.geometry)
             if bbox:
                 min_lat, max_lat, min_lng, max_lng = bbox
-                country.bounds = {
+                candidate = {
                     "west": min_lng,
                     "south": min_lat,
                     "east": max_lng,
                     "north": max_lat,
                 }
+                if bounds_look_valid_for_country(candidate, country.code):
+                    country.bounds = candidate
             country.save(update_fields=["boundary", "bounds"])
 
     return count

@@ -124,9 +124,42 @@ def country_boundary_geometry(country) -> dict[str, Any] | None:
     return preset.get("boundary")
 
 
+def _bounds_span(bounds: dict[str, float]) -> tuple[float, float] | None:
+    try:
+        west = float(bounds["west"])
+        east = float(bounds["east"])
+        south = float(bounds["south"])
+        north = float(bounds["north"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    lng_span = east - west
+    lat_span = north - south
+    if lng_span <= 0 or lat_span <= 0:
+        return None
+    return lng_span, lat_span
+
+
+def bounds_look_valid_for_country(bounds: dict[str, float], code: str) -> bool:
+    """Reject corrupt bboxes (e.g. a ward polygon saved as country bounds)."""
+    span = _bounds_span(bounds)
+    if span is None:
+        return False
+    lng_span, lat_span = span
+    preset = preset_for_code(code)
+    if not preset:
+        return lng_span >= 0.5 and lat_span >= 0.5
+    preset_bounds = preset.get("bounds") or {}
+    preset_span = _bounds_span(preset_bounds)
+    if preset_span is None:
+        return lng_span >= 2 and lat_span >= 2
+    preset_lng, preset_lat = preset_span
+    return lng_span >= preset_lng * 0.25 and lat_span >= preset_lat * 0.25
+
+
 def country_bounds_dict(country) -> dict[str, float]:
     if country.bounds and country.bounds.get("west") is not None:
-        return country.bounds
+        if bounds_look_valid_for_country(country.bounds, country.code):
+            return country.bounds
     preset = preset_for_code(country.code)
     bounds = preset.get("bounds")
     if bounds:
