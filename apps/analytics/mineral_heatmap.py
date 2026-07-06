@@ -117,19 +117,25 @@ def _layers_for_heatmap(
     layers: list[MapLayer],
     layer_ids: list[int],
 ) -> list[MapLayer]:
-    """Map layers for one mineral, limited to the checked layer ids from the map panel."""
+    """Resolve checked map layers; all ids must belong to one non-general mineral."""
     if not layer_ids:
         return []
-    slug_candidates = set(PERIODIC_LAYER_SLUGS.get(mineral_slug, [mineral_slug]))
     id_set = set(layer_ids)
-    matched: list[MapLayer] = []
-    seen: set[int] = set()
-    for layer in layers:
-        if layer.id in seen or layer.id not in id_set:
-            continue
-        if layer.mineral.slug == mineral_slug or layer.slug in slug_candidates:
-            seen.add(layer.id)
-            matched.append(layer)
+    matched = [layer for layer in layers if layer.id in id_set]
+    if not matched:
+        return []
+    mineral_slugs = {layer.mineral.slug for layer in matched}
+    if len(mineral_slugs) != 1:
+        return []
+    only_slug = next(iter(mineral_slugs))
+    if only_slug == GENERAL_MINERAL_SLUG:
+        return []
+    # URL slug may be a catalog alias; layer ids are authoritative once validated above.
+    slug_candidates = set(PERIODIC_LAYER_SLUGS.get(mineral_slug, [mineral_slug, only_slug]))
+    if mineral_slug not in slug_candidates and only_slug not in slug_candidates:
+        layer_slugs = {layer.slug for layer in matched}
+        if not slug_candidates.intersection(layer_slugs):
+            return []
     return matched
 
 
