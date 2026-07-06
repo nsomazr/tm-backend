@@ -6,16 +6,19 @@ import math
 from typing import Any
 
 from apps.geography.admin_boundary_service import _geometry_centroid
-from apps.maps.geometry_utils import geometry_area_km2, haversine_km
+from apps.maps.geometry_utils import geometry_area_km2, geometry_bbox, haversine_km, point_in_geometry
 from apps.maps.layer_defaults import GENERAL_MINERAL_SLUG
 from apps.maps.models import MapFeature, MapLayer
 
 from .insights import _accessible_features
 from .spatial_assign import feature_sample_point, layer_display_color
 
-MAX_HEATMAP_FEATURES = 5000
-MAX_HEATMAP_POINTS = 14000
+MAX_HEATMAP_POINTS = 28_000
 LINE_SAMPLE_KM = 2.5
+POLYGON_GRID_KM_MIN = 1.8
+POLYGON_GRID_KM_MAX = 4.5
+MAX_GRID_SAMPLES_PER_POLYGON = 64
+MAX_RING_SAMPLES = 28
 
 
 def _append_point(
@@ -56,10 +59,52 @@ def _sample_ring_vertices(ring: list[list[float]], *, weight: float) -> list[tup
     if len(ring) < 3:
         return []
     samples: list[tuple[float, float, float]] = []
-    step = max(1, len(ring) // 12)
+    step = max(1, len(ring) // MAX_RING_SAMPLES)
     for idx in range(0, len(ring), step):
         lng, lat = float(ring[idx][0]), float(ring[idx][1])
         samples.append((lat, lng, weight))
+    return samples
+
+
+def _sample_polygon_grid(geometry: dict[str, Any]) -> list[tuple[float, float, float]]:
+    """Interior grid so large deposit polygons glow across their full extent."""
+    bbox = geometry_bbox(geometry)
+    if not bbox:
+        return []
+    min_lat, max_lat, min_lng, max_lng = bbox
+    area = geometry_area_km2(geometry)
+    spacing_km = max(
+        POLYGON_GRID_KM_MIN,
+        min(POLYGON_GRID_KM_MAX, math.sqrt(max(area, 0.05) / 12.0)),
+    )
+    spacing_deg_lat = spacing_km / 111.0
+    mid_lat = (min_lat + max_lat) / 2
+    spacing_deg_lng = spacing_km / (111.0 * max(0.25, math.cos(math.radians(mid_lat))))
+
+    samples: list[tuple[float, float, float]] = []
+    lat = min_lat
+    while lat <= max_lat and len(samples) < MAX_GRID_SAMPLES_PER_POLYGON:
+        lng = min_lng
+        while lng <= max_lng and len(samples) < MAX_GRID_SAMPLES_PER_POLYGON:
+            if point_in_geometry(lng, lat, geometry):
+                samples.append((lat, lng, 0.78))
+            lng += spacing_deg_lng
+        lat += spacing_deg_lat
+    return samples
+
+
+def _sample_polygon_rings(geometry: dict[str, Any], *, weight: float) -> list[tuple[float, float, float]]:
+    coords = geometry.get("coordinates")
+    if not coords:
+        return []
+    gtype = geometry.get("type")
+    samples: list[tuple[float, float, float]] = []
+    if gtype == "Polygon" and coords[0]:
+        samples.extend(_sample_ring_vertices(coords[0], weight=weight))
+    elif gtype == "MultiPolygon":
+        for poly in coords:
+            if poly and poly[0]:
+                samples.extend(_sample_ring_vertices(poly[0], weight=weight))
     return samples
 
 
@@ -71,13 +116,8 @@ def _sample_polygon(geometry: dict[str, Any]) -> list[tuple[float, float, float]
     centroid_weight = min(2.4, max(0.85, math.sqrt(max(area, 0.02)) / 6.0))
     lat, lng = _geometry_centroid(geometry)
     samples: list[tuple[float, float, float]] = [(lat, lng, centroid_weight)]
-    gtype = geometry.get("type")
-    if gtype == "Polygon":
-        samples.extend(_sample_ring_vertices(coords[0], weight=0.72))
-    elif gtype == "MultiPolygon":
-        for poly in coords[:6]:
-            if poly and poly[0]:
-                samples.extend(_sample_ring_vertices(poly[0], weight=0.72))
+    samples.extend(_sample_polygon_rings(geometry, weight=0.72))
+    samples.extend(_sample_polygon_grid(geometry))
     return samples
 
 
@@ -140,7 +180,6 @@ def build_mineral_heatmap(
     country_code: str = "TZ",
     user=None,
     layer_ids: list[int] | None = None,
-    max_features: int = MAX_HEATMAP_FEATURES,
     locale: str = "en",
 ) -> dict | None:
     from apps.maps.localization import localized_name
@@ -163,29 +202,44 @@ def build_mineral_heatmap(
     else:
         slug = only_mineral_slug
     display_name = localized_name(mineral_layers[0], locale)
-    features = []
-    remaining = max_features
-    for layer in mineral_layers:
-        if remaining <= 0:
-            break
-        batch = list(_accessible_features(user).filter(layer=layer)[:remaining])
-        features.extend(batch)
-        remaining -= len(batch)
+    feature_counts = [
+        _accessible_features(user).filter(layer=layer).count() for layer in mineral_layers
+    ]
+    total_features = sum(feature_counts)
+    per_feature_cap = max(4, min(32, MAX_HEATMAP_POINTS // max(total_features, 1)))
+    max_features_to_sample = max(1, MAX_HEATMAP_POINTS // per_feature_cap)
+    pick_every = max(1, math.ceil(total_features / max_features_to_sample))
 
     points: list[dict[str, float]] = []
-    for feature in features:
-        for lat, lng, weight in heatmap_samples_for_feature(feature):
-            _append_point(points, lat, lng, weight)
-            if len(points) >= MAX_HEATMAP_POINTS:
-                break
+    features_used = 0
+    seen_index = 0
+    for layer in mineral_layers:
         if len(points) >= MAX_HEATMAP_POINTS:
             break
+        for feature in _accessible_features(user).filter(layer=layer).iterator(chunk_size=256):
+            if seen_index % pick_every != 0:
+                seen_index += 1
+                continue
+            seen_index += 1
+            if len(points) >= MAX_HEATMAP_POINTS:
+                break
+            features_used += 1
+            added = 0
+            for lat, lng, weight in heatmap_samples_for_feature(feature):
+                if added >= per_feature_cap:
+                    break
+                before = len(points)
+                _append_point(points, lat, lng, weight)
+                if len(points) > before:
+                    added += 1
+                if len(points) >= MAX_HEATMAP_POINTS:
+                    break
 
     return {
         "slug": slug,
         "name": display_name,
         "color": color,
-        "feature_count": len(features),
+        "feature_count": features_used,
         "point_count": len(points),
         "points": points,
     }
