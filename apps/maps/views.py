@@ -2,7 +2,7 @@ import json
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Prefetch
+from django.db.models import Count, Prefetch, Q
 from django.http import HttpResponse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
@@ -42,6 +42,14 @@ from .serializers import (
     MapLayerSerializer,
     SavedExplorationSerializer,
 )
+
+
+_ACTIVE_FEATURE = Q(features__is_active=True)
+_LIST_FEATURE_COUNT = Count("features", filter=_ACTIVE_FEATURE)
+
+
+def _annotate_list_feature_count(queryset):
+    return queryset.annotate(annotated_feature_count=_LIST_FEATURE_COUNT)
 
 
 class MapLayerViewSet(viewsets.ModelViewSet):
@@ -99,7 +107,9 @@ class MapLayerViewSet(viewsets.ModelViewSet):
                     )
                 )
                 if managed is not None:
-                    return qs.filter(mineral_id__in=managed).order_by("z_index", "name")
+                    qs = qs.filter(mineral_id__in=managed)
+                if self.action == "list":
+                    qs = _annotate_list_feature_count(qs)
                 return qs.order_by("z_index", "name")
             if self.action == "geojson" and self._can_manage_layers():
                 managed = get_managed_mineral_ids(self.request.user)
@@ -107,7 +117,10 @@ class MapLayerViewSet(viewsets.ModelViewSet):
                     qs = qs.filter(mineral_id__in=managed)
                 return qs.order_by("z_index", "name")
             qs = layers_with_mapped_data(qs)
-            return filter_layers_for_user(qs, self.request.user).order_by("z_index", "name")
+            qs = filter_layers_for_user(qs, self.request.user)
+            if self.action == "list":
+                qs = _annotate_list_feature_count(qs)
+            return qs.order_by("z_index", "name")
 
         managed = get_managed_mineral_ids(self.request.user)
         if managed is not None:

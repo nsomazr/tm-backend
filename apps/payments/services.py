@@ -69,8 +69,13 @@ def generate_invoice(payment_order_id):
     return invoice.id
 
 
-def _order_description(order):
+def order_description(order):
+    """Human-readable line for invoices and admin order detail."""
     if order.order_type == PaymentOrder.OrderType.SUBSCRIPTION:
+        if order.subscription_id:
+            plan = order.subscription.plan
+            cycle = plan.get_billing_cycle_display()
+            return f"{plan.name} subscription ({cycle.lower()})"
         return "Terra Meta subscription payment"
     if order.order_type == PaymentOrder.OrderType.DOWNLOAD:
         return f"Report download: {order.report.title if order.report else 'N/A'}"
@@ -78,7 +83,15 @@ def _order_description(order):
         aerial = (order.gateway_response or {}).get("aerial", {})
         extra = aerial.get("purchased_extra_km2", 0)
         return f"Extended aerial map analysis (+{extra:.0f} km²)"
-    return "Terra Meta license payment"
+    if order.order_type == PaymentOrder.OrderType.LICENSE:
+        if order.license_agreement_id:
+            return f"License agreement: {order.license_agreement.company_name}"
+        return "Terra Meta license payment"
+    return "Terra Meta payment"
+
+
+def _order_description(order):
+    return order_description(order)
 
 
 def activate_order(order, transaction_data=None):

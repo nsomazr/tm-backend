@@ -6,6 +6,8 @@ from rest_framework.views import APIView
 
 from apps.accounts.permissions import IsAdminUser
 from apps.accounts.throttling import PublicCatalogThrottleMixin
+from apps.analytics.credits import get_assistant_credit_quota
+from apps.reports.access import get_subscription_download_quota
 
 from .models import DownloadPurchase, SubscriptionPlan, SubscriptionReportDownload, UserSubscription
 from .serializers import (
@@ -48,7 +50,22 @@ class MySubscriptionView(generics.RetrieveAPIView):
     def retrieve(self, request, *args, **kwargs):
         obj = self.get_object()
         if not obj:
-            return Response({"detail": "No active subscription."}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {
+                    "id": None,
+                    "plan": None,
+                    "plan_detail": None,
+                    "status": None,
+                    "start_date": None,
+                    "end_date": None,
+                    "auto_renew": False,
+                    "is_active": False,
+                    "days_until_expiry": None,
+                    "download_quota": get_subscription_download_quota(request.user),
+                    "assistant_credits": get_assistant_credit_quota(request, request.user),
+                    "created_at": None,
+                }
+            )
         serializer = self.get_serializer(obj)
         return Response(serializer.data)
 

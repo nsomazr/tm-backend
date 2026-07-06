@@ -825,13 +825,33 @@ class AdminPlatformAnalyticsView(APIView):
     permission_classes = [IsAdminUser]
 
     def get(self, request):
-        return Response(build_admin_platform_analytics())
+        import logging
+
+        logger = logging.getLogger(__name__)
+        try:
+            return Response(build_admin_platform_analytics())
+        except Exception:
+            logger.exception("Failed to build admin platform analytics")
+            return Response(
+                {"detail": "Could not build platform analytics. Check server logs for details."},
+                status=500,
+            )
 
 
 class AdminManagerPerformanceView(APIView):
     permission_classes = [IsAdminUser]
 
     def get(self, request):
+        import logging
+
         from .manager_performance import build_manager_performance_review
 
-        return Response(build_manager_performance_review())
+        logger = logging.getLogger(__name__)
+        try:
+            return Response(build_manager_performance_review())
+        except Exception:
+            logger.exception("Failed to build manager performance review")
+            return Response(
+                {"detail": "Could not build manager performance review. Check server logs for details."},
+                status=500,
+            )

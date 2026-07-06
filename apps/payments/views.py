@@ -289,7 +289,7 @@ class AdminRevenueView(APIView):
         )
         pending_count = PaymentOrder.objects.filter(status=PaymentOrder.Status.PENDING).count()
         failed_count = PaymentOrder.objects.filter(status=PaymentOrder.Status.FAILED).count()
-        recent = PaymentOrder.objects.select_related("user").order_by("-created_at")[:20]
+        recent = _ADMIN_ORDER_QUERYSET.order_by("-created_at")[:20]
         return Response({
             "total_revenue": total,
             "by_type": list(by_type),
@@ -300,10 +300,19 @@ class AdminRevenueView(APIView):
         })
 
 
+_ADMIN_ORDER_QUERYSET = PaymentOrder.objects.select_related(
+    "user",
+    "subscription__plan",
+    "report",
+    "license_agreement",
+    "invoice",
+)
+
+
 class AdminPaymentOrderListView(generics.ListAPIView):
     permission_classes = [IsAdminUser]
     serializer_class = AdminPaymentOrderSerializer
-    queryset = PaymentOrder.objects.select_related("user").all()
+    queryset = _ADMIN_ORDER_QUERYSET.all()
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ["status", "order_type", "payment_provider", "user"]
     search_fields = ["merchant_reference", "order_tracking_id", "user__email", "user__username", "msisdn"]
@@ -314,7 +323,7 @@ class AdminPaymentOrderListView(generics.ListAPIView):
 class AdminPaymentOrderDetailView(generics.RetrieveAPIView):
     permission_classes = [IsAdminUser]
     serializer_class = AdminPaymentOrderSerializer
-    queryset = PaymentOrder.objects.select_related("user").all()
+    queryset = _ADMIN_ORDER_QUERYSET.all()
     lookup_field = "merchant_reference"
 
 
@@ -323,7 +332,7 @@ class AdminRefreshOrderView(APIView):
 
     def post(self, request, reference):
         try:
-            order = PaymentOrder.objects.get(merchant_reference=reference)
+            order = _ADMIN_ORDER_QUERYSET.get(merchant_reference=reference)
         except PaymentOrder.DoesNotExist:
             return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
         refresh_order_status(order)
@@ -336,7 +345,7 @@ class AdminCompleteOrderView(APIView):
 
     def post(self, request, reference):
         try:
-            order = PaymentOrder.objects.get(merchant_reference=reference)
+            order = _ADMIN_ORDER_QUERYSET.get(merchant_reference=reference)
         except PaymentOrder.DoesNotExist:
             return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
         if order.status == PaymentOrder.Status.COMPLETED:

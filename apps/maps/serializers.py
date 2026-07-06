@@ -174,6 +174,10 @@ class MapLayerSerializer(serializers.ModelSerializer):
         )
 
     def get_feature_count(self, obj):
+        for attr in ("annotated_feature_count", "active_feature_count"):
+            value = getattr(obj, attr, None)
+            if value is not None:
+                return value
         return obj.features.filter(is_active=True).count()
 
     def get_mineral_name(self, obj):

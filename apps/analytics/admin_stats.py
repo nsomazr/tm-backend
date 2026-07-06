@@ -15,6 +15,9 @@ from apps.subscriptions.models import DownloadPurchase, UserSubscription
 
 from .coverage_stats import build_hotspots_by_region, build_layer_inventory
 
+# Admin dashboard hotspot sampling: full scans over 100k+ features can timeout in production.
+ADMIN_HOTSPOT_FEATURE_CAP = 12_000
+
 
 def _monthly_trend(qs, date_field, months=6):
     cutoff = timezone.now() - timedelta(days=months * 31)
@@ -63,11 +66,15 @@ def build_admin_platform_analytics():
     )
     new_users_30d = users_qs.filter(created_at__gte=thirty_days_ago).count()
     signup_trend = _monthly_trend(users_qs, "created_at")
-    recent_users = list(
-        users_qs.order_by("-created_at")[:8].values(
+    recent_users = [
+        {
+            **row,
+            "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        }
+        for row in users_qs.order_by("-created_at")[:8].values(
             "username", "email", "role", "created_at", "organization"
         )
-    )
+    ]
 
     free_count = users_qs.filter(role=User.Role.FREE).count()
     subscriber_count = users_qs.filter(role=User.Role.SUBSCRIBER).count()
@@ -89,7 +96,9 @@ def build_admin_platform_analytics():
 
     mrr = Decimal("0")
     for sub in subs_qs.filter(status=UserSubscription.Status.ACTIVE).select_related("plan"):
-        price = sub.plan.price
+        if not sub.plan_id or sub.plan is None:
+            continue
+        price = sub.plan.price or Decimal("0")
         if sub.plan.billing_cycle == "annual":
             mrr += price / 12
         else:
@@ -159,7 +168,10 @@ def build_admin_platform_analytics():
         .values("layer_type")
         .annotate(count=Count("id"))
     )
-    hotspots_by_region = build_hotspots_by_region(active_features)
+    hotspots_by_region = build_hotspots_by_region(
+        active_features,
+        max_features=ADMIN_HOTSPOT_FEATURE_CAP,
+    )
     layers_inventory = build_layer_inventory()
     regions_covered = len([r for r in hotspots_by_region if r["region"] != "Unknown"])
 

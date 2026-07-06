@@ -11,6 +11,7 @@ from apps.geography.admin_boundary_service import _geometry_centroid
 from apps.geography.models import AdminBoundary, Country
 from apps.maps.access import layers_with_mapped_data
 from apps.maps.geometry_utils import geometry_area_km2, geometry_bbox, point_in_geometry
+from apps.maps.layer_defaults import GENERAL_MINERAL_SLUG
 from apps.maps.localization import localized_name
 from apps.maps.models import MapFeature, MapLayer
 
@@ -37,26 +38,44 @@ def _feature_polygon_area_km2(feature: MapFeature) -> float:
     return geometry_area_km2(feature.geometry)
 
 
+def _mineral_hotspot_group_key(row: dict[str, Any]) -> str:
+    """Group key for mineral-level hotspot rows.
+
+    Dedicated minerals merge polygon/point/line layers. Layers still on the shared
+    ``general`` mineral stay separate (layer slug) so each upload appears in selectors.
+    """
+    mineral_slug = row.get("mineral_slug") or row["slug"]
+    if mineral_slug == GENERAL_MINERAL_SLUG:
+        return row["slug"]
+    return mineral_slug
+
+
 def _aggregate_mineral_hotspots(layer_hotspots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One row per commodity mineral (sum polygon/point/line layers for the same mineral)."""
     merged: dict[str, dict[str, Any]] = {}
     for row in layer_hotspots:
         mineral_slug = row.get("mineral_slug") or row["slug"]
         mineral_name = row.get("mineral_name") or row["name"]
-        if mineral_slug not in merged:
-            merged[mineral_slug] = {
-                "slug": mineral_slug,
-                "name": mineral_name,
-                "name_sw": row.get("mineral_name_sw") or row.get("name_sw") or mineral_name,
+        group_key = _mineral_hotspot_group_key(row)
+        if group_key not in merged:
+            use_layer_identity = mineral_slug == GENERAL_MINERAL_SLUG
+            merged[group_key] = {
+                "slug": row["slug"] if use_layer_identity else mineral_slug,
+                "name": row["name"] if use_layer_identity else mineral_name,
+                "name_sw": (
+                    row.get("name_sw") or row["name"]
+                    if use_layer_identity
+                    else row.get("mineral_name_sw") or row.get("name_sw") or mineral_name
+                ),
                 "color": row["color"],
                 "feature_count": 0,
                 "layer_type": "mineral",
                 "hotspots": {},
             }
             if row.get("area_km2"):
-                merged[mineral_slug]["area_km2"] = 0.0
+                merged[group_key]["area_km2"] = 0.0
 
-        entry = merged[mineral_slug]
+        entry = merged[group_key]
         entry["feature_count"] += row["feature_count"]
         if row.get("area_km2"):
             entry["area_km2"] = entry.get("area_km2", 0.0) + row["area_km2"]
