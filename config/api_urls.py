@@ -1,6 +1,9 @@
 from django.urls import include, path
 
+from config.media import serve_public_media
+
 urlpatterns = [
+    path("media/<path:path>", serve_public_media, name="public-media"),
     path("auth/", include("apps.accounts.urls")),
     path("geography/", include("apps.geography.urls")),
     path("minerals/", include("apps.minerals.urls")),

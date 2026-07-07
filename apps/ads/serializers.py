@@ -3,6 +3,8 @@ import json
 from django.utils.text import slugify
 from rest_framework import serializers
 
+from config.media import public_media_url
+
 from .models import Ad, AdAudience, AdPlacement
 
 
@@ -31,18 +33,6 @@ def _form_data_to_dict(data):
     return dict(data)
 
 
-def _absolute_media_url(request, file_field) -> str:
-    if not file_field:
-        return ""
-    try:
-        url = file_field.url
-    except ValueError:
-        return ""
-    if request:
-        return request.build_absolute_uri(url)
-    return url
-
-
 class AdPublicSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
 
@@ -61,7 +51,7 @@ class AdPublicSerializer(serializers.ModelSerializer):
         )
 
     def get_image_url(self, obj):
-        return _absolute_media_url(self.context.get("request"), obj.image)
+        return public_media_url(self.context.get("request"), obj.image)
 
 
 class AdAdminSerializer(serializers.ModelSerializer):
@@ -119,7 +109,7 @@ class AdAdminSerializer(serializers.ModelSerializer):
         )
 
     def get_image_url(self, obj):
-        return _absolute_media_url(self.context.get("request"), obj.image)
+        return public_media_url(self.context.get("request"), obj.image)
 
     def get_is_live(self, obj):
         return obj.is_live()
