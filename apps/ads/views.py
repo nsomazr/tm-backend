@@ -1,3 +1,6 @@
+import mimetypes
+
+from django.http import FileResponse, Http404
 from rest_framework import generics, status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny
@@ -10,6 +13,28 @@ from apps.compliance.views import log_audit
 from .models import Ad, AdEvent
 from .serializers import AdAdminSerializer, AdPublicSerializer, AdTrackSerializer
 from .services import ads_for_placement, build_ad_admin_stats, record_ad_event
+
+
+class AdImageView(APIView):
+    """Serve campaign creative by id (works when nginx only proxies /api/)."""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        try:
+            ad = Ad.objects.get(pk=pk)
+        except Ad.DoesNotExist as exc:
+            raise Http404 from exc
+        if not ad.image:
+            raise Http404
+        try:
+            image_file = ad.image.open("rb")
+        except OSError as exc:
+            raise Http404 from exc
+        content_type, _ = mimetypes.guess_type(ad.image.name)
+        response = FileResponse(image_file, content_type=content_type or "application/octet-stream")
+        response["Cache-Control"] = "public, max-age=86400"
+        return response
 
 
 class AdServeView(APIView):

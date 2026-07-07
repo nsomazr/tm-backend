@@ -61,6 +61,10 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(f"  → {len(served)} campaign(s) would render"))
             for ad in served:
                 self.stdout.write(f"     - [{ad.id}] {ad.title}")
+                if ad.image:
+                    image_path = ad.image.path
+                    exists = "found" if __import__("os").path.isfile(image_path) else "MISSING on disk"
+                    self.stdout.write(f"       image: {ad.image.name} ({exists})")
         else:
             self.stdout.write(self.style.ERROR("  → [] (nothing would render)"))
             self.stdout.write(

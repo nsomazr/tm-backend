@@ -8,6 +8,24 @@ from django.urls import reverse
 from django.views.static import serve
 
 
+def public_ad_image_url(request, ad) -> str:
+    """Absolute URL for a campaign image under /api/v1/ads/<id>/image/."""
+    if not ad or not ad.image:
+        return ""
+    try:
+        if not ad.image.name:
+            return ""
+    except ValueError:
+        return ""
+    path = reverse("ad-image", kwargs={"pk": ad.pk})
+    if request:
+        return request.build_absolute_uri(path)
+    base = getattr(settings, "BACKEND_URL", "").rstrip("/")
+    if base:
+        return f"{base}{path}"
+    return path
+
+
 def public_media_url(request, file_field) -> str:
     """Build an absolute URL under /api/v1/media/ so it is reachable in production."""
     if not file_field:

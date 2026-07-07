@@ -3,7 +3,7 @@ import json
 from django.utils.text import slugify
 from rest_framework import serializers
 
-from config.media import public_media_url
+from config.media import public_ad_image_url
 
 from .models import Ad, AdAudience, AdPlacement
 
@@ -51,7 +51,7 @@ class AdPublicSerializer(serializers.ModelSerializer):
         )
 
     def get_image_url(self, obj):
-        return public_media_url(self.context.get("request"), obj.image)
+        return public_ad_image_url(self.context.get("request"), obj)
 
 
 class AdAdminSerializer(serializers.ModelSerializer):
@@ -109,7 +109,7 @@ class AdAdminSerializer(serializers.ModelSerializer):
         )
 
     def get_image_url(self, obj):
-        return public_media_url(self.context.get("request"), obj.image)
+        return public_ad_image_url(self.context.get("request"), obj)
 
     def get_is_live(self, obj):
         return obj.is_live()
