@@ -1,4 +1,5 @@
 import json
+from urllib.parse import urlparse
 
 from django.utils.text import slugify
 from rest_framework import serializers
@@ -173,6 +174,12 @@ class AdAdminSerializer(serializers.ModelSerializer):
     def validate_audience(self, value):
         if value not in AdAudience.values:
             raise serializers.ValidationError("Invalid audience.")
+        return value
+
+    def validate_link_url(self, value):
+        parsed = urlparse(str(value).strip())
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise serializers.ValidationError("Ad links must use HTTPS URLs.")
         return value
 
     def validate(self, attrs):

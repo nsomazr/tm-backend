@@ -493,6 +493,9 @@ class SavedExplorationViewSet(viewsets.ModelViewSet):
 def map_platform_settings(request):
     from apps.geography.models import Country
 
+    if request.method == "PATCH" and not IsAdminUser().has_permission(request, None):
+        return Response({"detail": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
+
     country_code = (
         (request.query_params.get("country") or request.data.get("country") or "TZ")
         .strip()
@@ -510,9 +513,6 @@ def map_platform_settings(request):
                 "coordinate_system": country.coordinate_system or DEFAULT_COORDINATE_SYSTEM,
             }
         )
-
-    if not IsAdminUser().has_permission(request, None):
-        return Response({"detail": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
 
     crs = request.data.get("coordinate_system")
     if not isinstance(crs, str) or not is_valid_coordinate_system(crs):

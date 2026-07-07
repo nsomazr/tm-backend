@@ -2,7 +2,12 @@ from django.db.models import Count
 from django.http import FileResponse
 from django.utils import timezone
 import io
-from apps.accounts.throttling import PublicCatalogThrottleMixin
+from apps.accounts.throttling import (
+    AIChatThrottleMixin,
+    AIInsightThrottleMixin,
+    HeatmapThrottleMixin,
+    PublicCatalogThrottleMixin,
+)
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -296,7 +301,7 @@ class InvestorDashboardView(APIView):
         })
 
 
-class MineralSearchInsightsView(PublicCatalogThrottleMixin, APIView):
+class MineralSearchInsightsView(AIInsightThrottleMixin, APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
@@ -366,7 +371,7 @@ class LayerBoundaryCoverageView(PublicCatalogThrottleMixin, APIView):
         return Response(payload)
 
 
-class MineralHeatmapView(PublicCatalogThrottleMixin, APIView):
+class MineralHeatmapView(HeatmapThrottleMixin, APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, slug: str):
@@ -424,7 +429,7 @@ class MineralExplorationQuotaView(APIView):
         return Response(get_mineral_exploration_quota(request, request.user))
 
 
-class SearchContextInsightsView(PublicCatalogThrottleMixin, APIView):
+class SearchContextInsightsView(AIInsightThrottleMixin, APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
@@ -511,7 +516,7 @@ class SearchContextInsightsView(PublicCatalogThrottleMixin, APIView):
         return Response(payload)
 
 
-class AreaInsightsView(PublicCatalogThrottleMixin, APIView):
+class AreaInsightsView(AIInsightThrottleMixin, APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
@@ -521,14 +526,14 @@ class AreaInsightsView(PublicCatalogThrottleMixin, APIView):
         return _build_area_insights_response(request)
 
 
-class AssistantCreditsView(PublicCatalogThrottleMixin, APIView):
+class AssistantCreditsView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
         return Response({"assistant_credits": get_assistant_credit_quota(request)})
 
 
-class AssistantChatHistoryView(PublicCatalogThrottleMixin, APIView):
+class AssistantChatHistoryView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
@@ -579,7 +584,7 @@ class AssistantChatHistoryView(PublicCatalogThrottleMixin, APIView):
         )
 
 
-class TerraAssistantChatView(PublicCatalogThrottleMixin, APIView):
+class TerraAssistantChatView(AIChatThrottleMixin, APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):

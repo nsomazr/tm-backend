@@ -148,6 +148,10 @@ def _export_subtitle(ctx: dict[str, Any], *, exploration_geometry: dict | None =
     return "Location analysis"
 
 
+MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
+MAX_SNAPSHOT_DIMENSION = 4096
+
+
 def _decode_map_snapshot(raw: str | None) -> bytes | None:
     if not raw or not isinstance(raw, str):
         return None
@@ -157,19 +161,26 @@ def _decode_map_snapshot(raw: str | None) -> bytes | None:
     payload = re.sub(r"\s+", "", payload)
     try:
         data = base64.b64decode(payload, validate=False)
-        if not data:
+        if not data or len(data) > MAX_SNAPSHOT_BYTES:
             return None
         try:
             return _prepare_snapshot_bytes(data)
         except Exception:
-            return data
+            return None
     except Exception:
         return None
 
 
 def _prepare_snapshot_bytes(raw: bytes) -> bytes:
     """Normalize browser canvas exports for ReportLab embedding."""
+    if len(raw) > MAX_SNAPSHOT_BYTES:
+        raise ValueError("Snapshot too large")
     with PILImage.open(io.BytesIO(raw)) as img:
+        width, height = img.size
+        if width > MAX_SNAPSHOT_DIMENSION or height > MAX_SNAPSHOT_DIMENSION:
+            raise ValueError("Snapshot dimensions too large")
+        if width * height > MAX_SNAPSHOT_DIMENSION * MAX_SNAPSHOT_DIMENSION:
+            raise ValueError("Snapshot pixel count too large")
         if img.mode in ("RGBA", "LA", "P"):
             background = PILImage.new("RGB", img.size, (255, 255, 255))
             if img.mode == "P":

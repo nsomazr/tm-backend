@@ -223,6 +223,20 @@ class AdminUserSerializer(serializers.ModelSerializer):
         )
         read_only_fields = ("id", "created_at")
 
+    def validate_is_active(self, value):
+        request = self.context.get("request")
+        actor = getattr(request, "user", None)
+        if (
+            self.instance
+            and is_privileged_role(self.instance.role)
+            and actor
+            and actor.is_authenticated
+            and actor.role != User.Role.SUPER_ADMIN
+            and value is False
+        ):
+            raise serializers.ValidationError("Only super admins can deactivate admin accounts.")
+        return value
+
     def validate_role(self, value):
         request = self.context.get("request")
         actor = getattr(request, "user", None)

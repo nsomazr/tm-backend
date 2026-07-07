@@ -733,18 +733,30 @@ def _boundary_at_point(
     *,
     margin: float | None = None,
 ) -> dict[str, Any] | None:
-    if margin is None:
-        margin = 0.06 if level == 4 else 0.45
     qs = AdminBoundary.objects.filter(
         country=country,
         level=level,
         source=AdminBoundary.Source.ADMIN_UPLOAD,
-        center_lat__gte=lat - margin,
-        center_lat__lte=lat + margin,
-        center_lng__gte=lng - margin,
-        center_lng__lte=lng + margin,
     ).only("id", "name", "name_sw", "code", "level", "geometry", "center_lat", "center_lng", "region_id")
+
+    # Villages can be very numerous — keep centroid prefilter for performance.
+    if level == 4:
+        if margin is None:
+            margin = 0.06
+        qs = qs.filter(
+            center_lat__gte=lat - margin,
+            center_lat__lte=lat + margin,
+            center_lng__gte=lng - margin,
+            center_lng__lte=lng + margin,
+        )
+
     for boundary in qs:
+        if level != 4:
+            bbox = geometry_bbox(boundary.geometry)
+            if bbox:
+                min_lat, max_lat, min_lng, max_lng = bbox
+                if lat < min_lat or lat > max_lat or lng < min_lng or lng > max_lng:
+                    continue
         if point_in_geometry(lng, lat, boundary.geometry):
             return _boundary_payload(boundary)
     return None
@@ -758,7 +770,15 @@ def lookup_boundaries_at_point(
     include_villages: bool = False,
     include_wards: bool = False,
 ) -> dict[str, Any]:
-    result: dict[str, Any] = {"region": None, "district": None, "ward": None, "village": None}
+    result: dict[str, Any] = {
+        "country": None,
+        "region": None,
+        "district": None,
+        "ward": None,
+        "village": None,
+    }
+
+    result["country"] = _boundary_at_point(country, 0, lat, lng)
 
     if include_villages:
         result["village"] = _boundary_at_point(country, 4, lat, lng)

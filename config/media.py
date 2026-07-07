@@ -5,7 +5,26 @@ from __future__ import annotations
 from django.conf import settings
 from django.http import Http404
 from django.urls import reverse
-from django.views.static import serve
+
+# Sensitive uploads must be served only through authenticated download views.
+_BLOCKED_MEDIA_PREFIXES = (
+    "reports/",
+    "invoices/",
+    "exploration_reports/",
+    "layer_uploads/",
+    "layer_imports/",
+    "boundary_geology/",
+    "ads/",
+)
+
+
+def _normalize_media_path(path: str) -> str:
+    return path.replace("\\", "/").lstrip("/")
+
+
+def _is_blocked_media_path(path: str) -> bool:
+    normalized = _normalize_media_path(path)
+    return any(normalized.startswith(prefix) for prefix in _BLOCKED_MEDIA_PREFIXES)
 
 
 def public_ad_image_url(request, ad) -> str:
@@ -34,7 +53,7 @@ def public_media_url(request, file_field) -> str:
         name = file_field.name
     except ValueError:
         return ""
-    if not name:
+    if not name or _is_blocked_media_path(name):
         return ""
     path = reverse("public-media", kwargs={"path": name})
     if request:
@@ -46,10 +65,13 @@ def public_media_url(request, file_field) -> str:
 
 
 def serve_public_media(request, path):
-    """Serve uploaded files from MEDIA_ROOT with path traversal protection."""
+    """Serve only intentionally public files from MEDIA_ROOT.
+
+    Reports, invoices, exploration PDFs, layer uploads, and ad images must use
+    their dedicated authenticated views (e.g. ReportDownloadView, AdImageView).
+    """
     if not path or path.startswith("/") or ".." in path.split("/"):
         raise Http404
-    response = serve(request, path, document_root=settings.MEDIA_ROOT)
-    if getattr(response, "status_code", 200) == 200:
-        response["Cache-Control"] = "public, max-age=86400"
-    return response
+    if _is_blocked_media_path(path):
+        raise Http404
+    raise Http404

@@ -1,4 +1,4 @@
-from rest_framework.throttling import AnonRateThrottle, SimpleRateThrottle
+from rest_framework.throttling import AnonRateThrottle, SimpleRateThrottle, UserRateThrottle
 
 
 class AuthAnonThrottle(AnonRateThrottle):
@@ -54,3 +54,35 @@ class PublicCatalogThrottleMixin:
     """Read-only catalog endpoints should not share the global anon burst budget."""
 
     throttle_classes = []
+
+
+class AIAnonRateThrottle(AnonRateThrottle):
+    scope = "ai_anon"
+
+
+class AIUserRateThrottle(UserRateThrottle):
+    scope = "ai_user"
+
+
+class AIChatAnonRateThrottle(AnonRateThrottle):
+    scope = "ai_chat_anon"
+
+
+class AIChatUserRateThrottle(UserRateThrottle):
+    scope = "ai_chat_user"
+
+
+class HeatmapAnonRateThrottle(AnonRateThrottle):
+    scope = "heatmap_anon"
+
+
+class AIInsightThrottleMixin:
+    throttle_classes = [AIAnonRateThrottle, AIUserRateThrottle]
+
+
+class AIChatThrottleMixin:
+    throttle_classes = [AIChatAnonRateThrottle, AIChatUserRateThrottle]
+
+
+class HeatmapThrottleMixin:
+    throttle_classes = [HeatmapAnonRateThrottle, AIUserRateThrottle]

@@ -110,7 +110,9 @@ def parse_snippe_paid(response: dict[str, Any]) -> bool:
 
 def verify_snippe_webhook(raw_body: str, headers: dict[str, str]) -> dict[str, Any]:
     signing_key = getattr(settings, "SNIPPE_WEBHOOK_SECRET", "")
-    if signing_key:
+    if snippe_is_configured():
+        if not signing_key:
+            raise SnippeWebhookError("Webhook secret not configured.")
         timestamp = headers.get("X-Webhook-Timestamp") or headers.get("x-webhook-timestamp") or ""
         signature = headers.get("X-Webhook-Signature") or headers.get("x-webhook-signature") or ""
         if not timestamp or not signature:
@@ -126,6 +128,21 @@ def verify_snippe_webhook(raw_body: str, headers: dict[str, str]) -> dict[str, A
         ).hexdigest()
         if not hmac.compare_digest(signature, expected):
             raise SnippeWebhookError("Invalid webhook signature.")
+    elif signing_key:
+        timestamp = headers.get("X-Webhook-Timestamp") or headers.get("x-webhook-timestamp") or ""
+        signature = headers.get("X-Webhook-Signature") or headers.get("x-webhook-signature") or ""
+        if timestamp and signature:
+            event_time = int(timestamp)
+            if abs(int(time.time()) - event_time) > 300:
+                raise SnippeWebhookError("Webhook timestamp too old.")
+            message = f"{timestamp}.{raw_body}"
+            expected = hmac.new(
+                signing_key.encode(),
+                message.encode(),
+                hashlib.sha256,
+            ).hexdigest()
+            if not hmac.compare_digest(signature, expected):
+                raise SnippeWebhookError("Invalid webhook signature.")
 
     try:
         return json.loads(raw_body)

@@ -74,7 +74,12 @@ def _build_checkout_order(request, data):
         currency = report.currency
 
     elif order_type == PaymentOrder.OrderType.LICENSE:
-        license_agreement = LicenseAgreement.objects.get(id=data["license_id"])
+        license_agreement = LicenseAgreement.objects.get(
+            id=data["license_id"],
+            status__in=[LicenseAgreement.Status.APPROVED, LicenseAgreement.Status.ACTIVE],
+        )
+        if license_agreement.user_id and license_agreement.user_id != user.id:
+            raise ValidationError({"license_id": "This license is assigned to another account."})
         amount = license_agreement.price
         currency = license_agreement.currency
 

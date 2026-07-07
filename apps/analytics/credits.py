@@ -5,6 +5,7 @@ from __future__ import annotations
 from calendar import monthrange
 from datetime import date
 
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
@@ -17,6 +18,8 @@ from .chat_history import user_has_chat_history
 
 FREE_MONTHLY_CREDITS = 10
 ANONYMOUS_SESSION_CREDITS = 5
+ANONYMOUS_IP_DAILY_CREDITS = 15
+ANONYMOUS_IP_CACHE_SECONDS = 86400
 DEFAULT_MONTHLY_PLAN_CREDITS = 3000
 DEFAULT_ANNUAL_PLAN_CREDITS = 5000
 
@@ -47,6 +50,37 @@ def _session_key(request) -> str:
     if not request.session.session_key:
         request.session.create()
     return request.session.session_key or ""
+
+
+def _client_ip(request) -> str:
+    if not request:
+        return ""
+    forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.META.get("REMOTE_ADDR", "") or ""
+
+
+def _anon_ip_cache_key(request) -> str:
+    ip = _client_ip(request)
+    if not ip:
+        return ""
+    return f"anon_assistant_ip:{ip}"
+
+
+def _anon_ip_used(request) -> int:
+    key = _anon_ip_cache_key(request)
+    if not key:
+        return 0
+    return int(cache.get(key, 0) or 0)
+
+
+def _track_anon_ip_usage(request, credits: int) -> None:
+    key = _anon_ip_cache_key(request)
+    if not key:
+        return
+    used = _anon_ip_used(request) + max(1, int(credits))
+    cache.set(key, used, timeout=ANONYMOUS_IP_CACHE_SECONDS)
 
 
 def _usage_queryset(*, user=None, session_key="", period_start=None, subscription=None):
@@ -138,8 +172,12 @@ def get_assistant_credit_quota(request, user=None) -> dict:
 
     session_key = _session_key(request) if request else ""
     limit = ANONYMOUS_SESSION_CREDITS
-    used = _used_credits(_usage_queryset(session_key=session_key))
-    remaining = max(0, limit - used)
+    session_used = _used_credits(_usage_queryset(session_key=session_key))
+    ip_used = _anon_ip_used(request) if request else 0
+    session_remaining = max(0, limit - session_used)
+    ip_remaining = max(0, ANONYMOUS_IP_DAILY_CREDITS - ip_used)
+    remaining = min(session_remaining, ip_remaining)
+    used = max(session_used, ip_used)
     return {
         "limit": limit,
         "used": used,
@@ -182,4 +220,6 @@ def consume_assistant_credit(request, *, kind: str, user=None, credits: int = 1)
         kind=kind,
         credits=amount,
     )
+    if not user or not user.is_authenticated:
+        _track_anon_ip_usage(request, amount)
     return get_assistant_credit_quota(request, user=user)

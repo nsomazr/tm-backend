@@ -34,7 +34,7 @@ def _host_from_url(url: str) -> str:
 
 
 SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-dev-key-change-in-production")
-DEBUG = os.getenv("DEBUG", "True").lower() in ("true", "1", "yes")
+DEBUG = os.getenv("DEBUG", "False").lower() in ("true", "1", "yes")
 ALLOWED_HOSTS = _split_env_list("ALLOWED_HOSTS", "localhost,127.0.0.1")
 
 _INSECURE_SECRET_KEYS = {
@@ -161,6 +161,11 @@ REST_FRAMEWORK = {
         "otp_verify": "40/hour",
         "upload": "30/hour",
         "map_geojson": "300/hour",
+        "ai_anon": "40/hour",
+        "ai_user": "200/hour",
+        "ai_chat_anon": "20/hour",
+        "ai_chat_user": "80/hour",
+        "heatmap_anon": "60/hour",
     },
 }
 
@@ -199,7 +204,7 @@ if _ngrok_origins:
     CORS_ALLOWED_ORIGINS = list(dict.fromkeys([*CORS_ALLOWED_ORIGINS, *_ngrok_origins]))
 if _ngrok_hosts:
     ALLOWED_HOSTS = list(dict.fromkeys([*ALLOWED_HOSTS, *_ngrok_hosts]))
-if NGROK_ALLOW_WILDCARD or DEBUG:
+if NGROK_ALLOW_WILDCARD:
     ALLOWED_HOSTS = list(dict.fromkeys([*ALLOWED_HOSTS, ".ngrok-free.app", ".ngrok.io"]))
     CORS_ALLOWED_ORIGIN_REGEXES = [
         r"^https://[\w-]+\.ngrok-free\.app$",
@@ -265,6 +270,8 @@ AERIAL_MAX_BILLABLE_EXTRA_KM2 = float(os.getenv("AERIAL_MAX_BILLABLE_EXTRA_KM2",
 PAYMENTS_SIMULATE = os.getenv("PAYMENTS_SIMULATE", "false").lower() in ("1", "true", "yes")
 if not DEBUG and PAYMENTS_SIMULATE:
     raise ImproperlyConfigured("PAYMENTS_SIMULATE must not be enabled when DEBUG=False.")
+if not DEBUG and SNIPPE_API_KEY and not SNIPPE_WEBHOOK_SECRET:
+    raise ImproperlyConfigured("Set SNIPPE_WEBHOOK_SECRET when Snippe payments are enabled in production.")
 
 # Max shapefile / GeoJSON upload size (bytes)
 MAP_UPLOAD_MAX_BYTES = int(os.getenv("MAP_UPLOAD_MAX_BYTES", str(50 * 1024 * 1024)))
