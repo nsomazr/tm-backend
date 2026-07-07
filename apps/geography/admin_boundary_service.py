@@ -754,11 +754,16 @@ def lookup_boundaries_at_point(
     country: Country,
     lat: float,
     lng: float,
+    *,
+    include_villages: bool = False,
+    include_wards: bool = False,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {"region": None, "district": None, "ward": None, "village": None}
 
-    result["village"] = _boundary_at_point(country, 4, lat, lng)
-    result["ward"] = _boundary_at_point(country, 3, lat, lng)
+    if include_villages:
+        result["village"] = _boundary_at_point(country, 4, lat, lng)
+    if include_villages or include_wards:
+        result["ward"] = _boundary_at_point(country, 3, lat, lng)
     result["district"] = _boundary_at_point(country, 2, lat, lng)
     result["region"] = _boundary_at_point(country, 1, lat, lng)
 

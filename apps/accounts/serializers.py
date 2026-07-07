@@ -102,12 +102,42 @@ class EmailOnlySerializer(serializers.Serializer):
 
 
 class SendOTPSerializer(serializers.Serializer):
-    email = serializers.EmailField()
+    email = serializers.EmailField(required=False, allow_blank=True)
+    phone = serializers.CharField(required=False, allow_blank=True, max_length=20)
     purpose = serializers.ChoiceField(choices=["register", "login"])
 
     def validate(self, attrs):
-        email = attrs["email"].strip().lower()
+        from .phone_utils import normalize_tz_phone
+
+        email = (attrs.get("email") or "").strip().lower()
+        phone_raw = (attrs.get("phone") or "").strip()
         purpose = attrs["purpose"]
+
+        if email and phone_raw:
+            raise serializers.ValidationError("Provide either email or phone, not both.")
+        if not email and not phone_raw:
+            raise serializers.ValidationError("Email or phone number is required.")
+
+        if phone_raw:
+            phone = normalize_tz_phone(phone_raw)
+            if not phone:
+                raise serializers.ValidationError(
+                    {"phone": "Enter a valid Tanzania mobile number (e.g. 07XXXXXXXX)."}
+                )
+            exists = User.objects.filter(phone__in=[phone, f"0{phone[3:]}"]).exists()
+            if purpose == "register" and exists:
+                raise serializers.ValidationError(
+                    {"phone": "An account with this phone number already exists. Sign in instead."}
+                )
+            if purpose == "login" and not exists:
+                raise serializers.ValidationError(
+                    {"phone": "No account found for this phone number. Create an account first."}
+                )
+            attrs["channel"] = "sms"
+            attrs["phone"] = phone
+            attrs.pop("email", None)
+            return attrs
+
         exists = User.objects.filter(email__iexact=email).exists()
         if purpose == "register" and exists:
             raise serializers.ValidationError(
@@ -117,17 +147,38 @@ class SendOTPSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {"email": "No account found for this email. Create an account first."}
             )
+        attrs["channel"] = "email"
         attrs["email"] = email
         return attrs
 
 
 class VerifyOTPSerializer(serializers.Serializer):
-    email = serializers.EmailField()
+    email = serializers.EmailField(required=False, allow_blank=True)
+    phone = serializers.CharField(required=False, allow_blank=True, max_length=20)
     code = serializers.CharField(min_length=6, max_length=6)
     purpose = serializers.ChoiceField(choices=["register", "login"])
 
     def validate(self, attrs):
-        attrs["email"] = attrs["email"].strip().lower()
+        from .phone_utils import normalize_tz_phone
+
+        email = (attrs.get("email") or "").strip().lower()
+        phone_raw = (attrs.get("phone") or "").strip()
+        if email and phone_raw:
+            raise serializers.ValidationError("Provide either email or phone, not both.")
+        if not email and not phone_raw:
+            raise serializers.ValidationError("Email or phone number is required.")
+
+        if phone_raw:
+            phone = normalize_tz_phone(phone_raw)
+            if not phone:
+                raise serializers.ValidationError(
+                    {"phone": "Enter a valid Tanzania mobile number (e.g. 07XXXXXXXX)."}
+                )
+            attrs["channel"] = "sms"
+            attrs["phone"] = phone
+        else:
+            attrs["channel"] = "email"
+            attrs["email"] = email
         attrs["code"] = attrs["code"].strip()
         return attrs
 

@@ -6,9 +6,15 @@ from urllib.parse import urlparse
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
-load_dotenv()
-
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Dev defaults from .env.example; machine-specific overrides from .env (gitignored).
+_example_env = BASE_DIR / ".env.example"
+_local_env = BASE_DIR / ".env"
+if _example_env.exists():
+    load_dotenv(_example_env)
+if _local_env.exists():
+    load_dotenv(_local_env, override=True)
 
 
 def _split_env_list(name: str, default: str = "") -> list[str]:
@@ -60,6 +66,7 @@ INSTALLED_APPS = [
     "apps.reports",
     "apps.analytics",
     "apps.compliance",
+    "apps.ads",
 ]
 
 MIDDLEWARE = [
@@ -123,6 +130,8 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
+# Insight PDF exports may include a compressed base64 map snapshot in the JSON body.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 12 * 1024 * 1024
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -249,7 +258,8 @@ if not SNIPPE_CANCEL_URL:
 # Aerial map analysis: included km² per view and price per extra km² (TZS).
 AERIAL_INCLUDED_KM2 = float(os.getenv("AERIAL_INCLUDED_KM2", "10"))
 AERIAL_PRICE_PER_KM2 = os.getenv("AERIAL_PRICE_PER_KM2", "10000")
-AERIAL_MAX_BILLABLE_EXTRA_KM2 = float(os.getenv("AERIAL_MAX_BILLABLE_EXTRA_KM2", "500"))
+AERIAL_MAX_ANALYSIS_KM2 = float(os.getenv("AERIAL_MAX_ANALYSIS_KM2", "300"))
+AERIAL_MAX_BILLABLE_EXTRA_KM2 = float(os.getenv("AERIAL_MAX_BILLABLE_EXTRA_KM2", "290"))
 
 # Local dev only: auto-complete checkout when Snippe is not configured.
 PAYMENTS_SIMULATE = os.getenv("PAYMENTS_SIMULATE", "false").lower() in ("1", "true", "yes")
@@ -279,13 +289,19 @@ EMAIL_LOGO_URL = os.getenv("EMAIL_LOGO_URL", "").strip()
 
 # Intelligence summaries - provider: ollama | groq | gemini (with comma-separated fallbacks)
 AI_PROVIDER = os.getenv("AI_PROVIDER", "groq")
-AI_PROVIDER_FALLBACK = os.getenv("AI_PROVIDER_FALLBACK", "groq,gemini,ollama")
+AI_PROVIDER_FALLBACK = os.getenv("AI_PROVIDER_FALLBACK", "gemini,ollama")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:0.6b")
+OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+# Tavily web search for report writing assistant
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+TAVILY_MAX_RESULTS = int(os.getenv("TAVILY_MAX_RESULTS", "5"))
+TAVILY_SEARCH_ENABLED = os.getenv("TAVILY_SEARCH_ENABLED", "true").lower() in ("1", "true", "yes")
 
 CSRF_TRUSTED_ORIGINS = _split_env_list(
     "CSRF_TRUSTED_ORIGINS",
@@ -312,4 +328,10 @@ EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True").lower() in ("1", "true", "yes
 EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "False").lower() in ("1", "true", "yes")
 EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
-DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "5G Geology <admin@5ggeology.com>")
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "5G Geology Futures <admin@5ggeology.com>")
+
+# Beem Africa SMS (phone OTP for local sign-up / sign-in)
+BEEM_SMS_API_KEY = os.getenv("BEEM_SMS_API_KEY", "")
+BEEM_SMS_SECRET_KEY = os.getenv("BEEM_SMS_SECRET_KEY", "")
+BEEM_SMS_SOURCE_ADDR = os.getenv("BEEM_SMS_SOURCE_ADDR", "NILEAGI")
+BEEM_SMS_VERIFY_SSL = os.getenv("BEEM_SMS_VERIFY_SSL", "True").lower() in ("1", "true", "yes")

@@ -51,6 +51,53 @@ def boundary_center_and_bounds(boundary: AdminBoundary) -> tuple[dict | None, di
     return None, None
 
 
+def features_in_exploration_scope(
+    features: list[MapFeature],
+    exploration_geometry: dict[str, Any],
+    *,
+    point_buffer_km: float = 1.5,
+    line_buffer_km: float = 2.0,
+) -> list[MapFeature]:
+    """Keep only features that fall inside a user-drawn exploration geometry."""
+    from apps.maps.geometry_utils import distance_geometry_to_point_km, haversine_km
+
+    if not exploration_geometry or "type" not in exploration_geometry:
+        return []
+
+    gtype = exploration_geometry.get("type")
+    coords = exploration_geometry.get("coordinates")
+    if not coords:
+        return []
+
+    matched: list[MapFeature] = []
+    for feature in features:
+        if gtype == "Polygon":
+            if feature_in_boundary_geometry(feature, exploration_geometry):
+                matched.append(feature)
+            continue
+
+        flat, flng = feature_sample_point(feature)
+
+        if gtype == "Point":
+            elng, elat = float(coords[0]), float(coords[1])
+            if (
+                haversine_km(flat, flng, elat, elng) <= point_buffer_km
+                or distance_geometry_to_point_km(elat, elng, feature.geometry) <= point_buffer_km
+            ):
+                matched.append(feature)
+            continue
+
+        if gtype == "LineString":
+            min_dist = float("inf")
+            for vertex in coords:
+                d = distance_geometry_to_point_km(float(vertex[1]), float(vertex[0]), feature.geometry)
+                min_dist = min(min_dist, d)
+            if min_dist <= line_buffer_km:
+                matched.append(feature)
+
+    return matched
+
+
 def features_in_boundary(boundary: AdminBoundary, features: list[MapFeature]) -> list[MapFeature]:
     boundary_bbox = geometry_bbox(boundary.geometry)
     matched: list[MapFeature] = []

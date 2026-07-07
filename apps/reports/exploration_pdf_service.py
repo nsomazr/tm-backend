@@ -31,7 +31,7 @@ def build_exploration_report_pdf(record: UserExplorationReport) -> bytes:
         canvas.saveState()
         canvas.setFont("Helvetica", 8)
         canvas.setFillColor(colors.HexColor("#64748b"))
-        canvas.drawString(0.85 * inch, 0.55 * inch, "Terra Meta · 5G Geology")
+        canvas.drawString(0.85 * inch, 0.55 * inch, "Terra Meta · 5G Geology Futures")
         canvas.drawRightString(
             A4[0] - 0.85 * inch,
             0.55 * inch,

@@ -11,6 +11,7 @@ from apps.geography.region_geo import region_at_point, region_center, region_zoo
 from apps.maps.access import filter_layers_for_user, layers_with_mapped_data, user_has_map_detail_access
 from apps.maps.geometry_utils import (
     bbox_intersects_click,
+    distance_geometry_to_point_km,
     feature_contains_click,
     geometry_area_km2,
     geometry_bbox,
@@ -26,7 +27,26 @@ from .spatial_assign import (
     commodities_from_features,
     feature_sample_point,
     features_in_boundary,
+    features_in_exploration_scope,
 )
+
+
+def parse_exploration_geometry(raw) -> dict | None:
+    """Parse GeoJSON geometry from API query/body (dict or JSON string)."""
+    import json
+
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw if raw.get("type") and raw.get("coordinates") is not None else None
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(data, dict) and data.get("type") and data.get("coordinates") is not None:
+            return data
+    return None
 
 
 def _accessible_layers(user):
@@ -172,8 +192,8 @@ def _region_counts_for_features(features: list[MapFeature], country_code: str = 
 def _format_region_stat_line(row: dict) -> str:
     area = row.get("area_km2")
     if area and area > 0:
-        return f"{row['region']} ({row['count']} zones, {area:.2f} km²)"
-    return f"{row['region']} ({row['count']} zones)"
+        return f"{row['region']} ({row['count']} areas, {area:.2f} km²)"
+    return f"{row['region']} ({row['count']} areas)"
 
 
 def _apply_polygon_coverage_totals(ctx: dict, features: list, user, locale: str) -> dict:
@@ -435,6 +455,117 @@ def mineral_search_insights(query: str, user, limit: int = 8) -> list[dict]:
     return results[:limit]
 
 
+def catalog_mineral_coverage_context(
+    catalog_slug: str,
+    user,
+    locale: str = "en",
+    *,
+    country_code: str = "TZ",
+) -> dict | None:
+    """Aggregate map layers, features, and reports for a periodic-table commodity."""
+    from apps.reports.models import Report
+
+    from .mineral_coverage import _feature_counts_by_layer, layers_for_catalog_slug
+
+    layers = layers_for_catalog_slug(catalog_slug, country_code=country_code)
+    if not layers:
+        return mineral_coverage_context(catalog_slug, user, locale=locale)
+
+    layer_ids = {layer.id for layer in layers}
+    layer_counts = _feature_counts_by_layer(layer_ids)
+    features: list[MapFeature] = []
+    for layer in layers:
+        batch = list(
+            _accessible_features(user)
+            .filter(layer=layer)
+            .select_related("layer", "layer__region", "layer__mineral")[:1200]
+        )
+        features.extend(batch)
+        if len(features) >= 1200:
+            features = features[:1200]
+            break
+
+    top_regions = _region_stats_for_features(features)[:8]
+    lats, lngs = [], []
+    for feature in features:
+        if feature.latitude and feature.longitude:
+            lats.append(float(feature.latitude))
+            lngs.append(float(feature.longitude))
+
+    center = None
+    if lats and lngs:
+        center = {"lat": sum(lats) / len(lats), "lng": sum(lngs) / len(lngs)}
+
+    mineral_slugs = {layer.mineral.slug for layer in layers if layer.mineral_id}
+    mineral = None
+    try:
+        mineral = Mineral.objects.get(slug=catalog_slug, is_active=True)
+    except Mineral.DoesNotExist:
+        mineral = None
+
+    search_name = localized_name(mineral, locale) if mineral else localized_name(layers[0], locale)
+    description = (mineral.description if mineral else layers[0].description) or ""
+
+    connected_layers = [
+        {
+            "id": layer.id,
+            "slug": layer.slug,
+            "name": localized_name(layer, locale),
+            "layer_type": layer.layer_type,
+            "feature_count": layer_counts.get(layer.id, 0),
+        }
+        for layer in layers
+    ]
+
+    reports_qs = (
+        Report.objects.filter(is_active=True)
+        .select_related("mineral", "region")
+        .filter(
+            Q(mineral__slug=catalog_slug)
+            | Q(mineral__slug__in=mineral_slugs)
+            | Q(layers__id__in=layer_ids)
+        )
+        .distinct()[:12]
+    )
+    related_reports = [
+        {
+            "slug": report.slug,
+            "title": report.title,
+            "access_type": report.access_type,
+            "has_article": report.has_article,
+            "region": localized_name(report.region, locale) if report.region else None,
+        }
+        for report in reports_qs
+    ]
+
+    ctx = {
+        "lat": center["lat"] if center else -6.369,
+        "lng": center["lng"] if center else 34.888,
+        "zoom": 9,
+        "region": top_regions[0]["region"] if top_regions else None,
+        "minerals": [
+            {
+                "slug": catalog_slug,
+                "name": search_name,
+                "name_sw": mineral.name_sw if mineral else (layers[0].name_sw or ""),
+                "color": mineral.color if mineral else _layer_display_color(layers[0]),
+                "count": len(features),
+            }
+        ],
+        "feature_count": len(features),
+        "labels": [],
+        "has_mapped_data": len(features) > 0,
+        "search_type": "mineral",
+        "search_name": search_name,
+        "description": description,
+        "top_regions": top_regions,
+        "connected_layers": connected_layers,
+        "related_reports": related_reports,
+        "catalog_slug": catalog_slug,
+    }
+    return _apply_polygon_coverage_totals(ctx, features, user, locale)
+
+
 def mineral_coverage_context(mineral_slug: str, user, locale: str = "en") -> dict | None:
     mineral = None
     try:
@@ -525,7 +656,9 @@ def admin_boundary_coverage_context(admin_boundary_id: int, user, locale: str = 
     else:
         search_type = "region_boundary"
 
-    return {
+    from apps.geography.geology_context import geology_context_for_boundary
+
+    ctx = {
         "lat": center["lat"] if center else -6.369,
         "lng": center["lng"] if center else 34.888,
         "zoom": region_zoom(boundary.name) if boundary.level == 1 else (13 if boundary.level == 4 else (12 if boundary.level == 3 else 11)),
@@ -543,6 +676,10 @@ def admin_boundary_coverage_context(admin_boundary_id: int, user, locale: str = 
         "top_minerals": commodities[:8],
         "bounds": bounds,
     }
+    geology = geology_context_for_boundary(boundary, locale)
+    if geology.get("entries"):
+        ctx["geological_context"] = geology
+    return ctx
 
 
 def region_coverage_context(region_id: int, user, locale: str = "en") -> dict | None:
@@ -652,21 +789,28 @@ def build_search_ai_context(ctx: dict) -> str:
     kind = ctx.get("search_type")
     total_area = ctx.get("total_area_km2")
     area_line = (
-        f"Total mapped polygon coverage area: {total_area:.2f} km²\n" if total_area else ""
+        f"Total mapped mineral coverage area: {total_area:.2f} km²\n" if total_area else ""
     )
     if kind == "mineral":
         regions = ", ".join(_format_region_stat_line(r) for r in ctx.get("top_regions", [])) or "none listed"
         desc = ctx.get("description") or "none"
+        layer_lines = ", ".join(
+            f"{row['name']} ({row['layer_type']}, {row['feature_count']} features)"
+            for row in ctx.get("connected_layers", [])
+        ) or "none listed"
+        report_lines = ", ".join(row["title"] for row in ctx.get("related_reports", [])) or "none listed"
         return (
             f"User searched for mineral: {ctx['search_name']}\n"
             f"Mineral overview: {desc}\n"
-            f"Total mapped zones for this mineral on Terra Meta: {ctx['feature_count']}\n"
+            f"Total mapped areas for this mineral on Terra Meta: {ctx['feature_count']}\n"
             f"{area_line}"
-            f"Regions where this mineral appears on the map (ranked by zone count): {regions}\n"
+            f"Connected map layers (polygons, points, structures): {layer_lines}\n"
+            f"Related Terra reports and studies: {report_lines}\n"
+            f"Regions where this mineral appears on the map (ranked by area count): {regions}\n"
             f"Map center for this mineral: {ctx['lat']:.4f}, {ctx['lng']:.4f}\n"
-            f"Important: Answer using ONLY the region list, zone counts, and km² values above. "
+            f"Important: Answer using ONLY the layer list, report list, region list, area counts, and km² values above. "
             f"When asked which regions have the most coverage, rank and cite the regions listed above. "
-            f"Do not say regional data is unavailable if regions are listed.\n"
+            f"Reference connected reports when relevant. Do not say regional data is unavailable if regions are listed.\n"
         )
 
     if kind == "layer":
@@ -677,7 +821,7 @@ def build_search_ai_context(ctx: dict) -> str:
             f"Layer type: {layer_type}\n"
             f"Total mapped features on Terra Meta: {ctx['feature_count']}\n"
             f"{area_line}"
-            f"Regions where this layer appears (ranked by zone count): {regions}\n"
+            f"Regions where this layer appears (ranked by area count): {regions}\n"
             f"Map center: {ctx['lat']:.4f}, {ctx['lng']:.4f}\n"
             f"Important: Summarize using ONLY the mapped counts, regions, and km² values above. "
             f"When asked about top regions, use the ranked region list.\n"
@@ -685,7 +829,7 @@ def build_search_ai_context(ctx: dict) -> str:
 
     if kind in ("region_boundary", "district_boundary", "ward_boundary", "village_boundary", "region"):
         commodities = ", ".join(
-            f"{m['name']} ({m['count']} zones)" for m in ctx.get("minerals", [])
+            f"{m['name']} ({m['count']} areas)" for m in ctx.get("minerals", [])
         ) or "none listed"
         if kind == "district_boundary":
             admin_label = "district"
@@ -695,13 +839,17 @@ def build_search_ai_context(ctx: dict) -> str:
             admin_label = "village"
         else:
             admin_label = "region"
+        geology = ctx.get("geological_context") or {}
+        geology_block = f"{geology['ai_block']}\n" if geology.get("ai_block") else ""
         return (
             f"User searched for {admin_label}: {ctx['search_name']}\n"
             f"Total mapped features in this {admin_label}: {ctx['feature_count']}\n"
             f"Commodity layers mapped here: {commodities}\n"
             f"Map center: {ctx['lat']:.4f}, {ctx['lng']:.4f}\n"
             f"Country: Tanzania\n"
-            f"Important: Summarize only the commodities and counts listed above.\n"
+            f"{geology_block}"
+            f"Important: Summarize commodities, counts, and geological reference above. "
+            f"Use geological context when explaining area setting and mineral potential.\n"
         )
 
     return (
@@ -716,14 +864,14 @@ def generate_basic_search_insight(ctx: dict, locale: str = "en") -> str:
         if kind == "mineral":
             if locale == "sw":
                 return f"Hakuna maeneo yaliyopangwa kwa {ctx['search_name']} kwenye ramani."
-            return f"No mapped zones for {ctx['search_name']} are available on the map yet."
+            return f"No mapped areas for {ctx['search_name']} are available on the map yet."
         if kind == "layer":
             if locale == "sw":
                 return f"Hakuna vipengele vilivyopangwa kwa tabaka {ctx['search_name']}."
             return f"No mapped features are available for layer {ctx['search_name']} yet."
         if locale == "sw":
             return f"Hakuna data ya madini iliyopangwa kwa {ctx['search_name']}."
-        return f"No mapped mineral zones are available for {ctx['search_name']} yet."
+        return f"No mapped mineral areas are available for {ctx['search_name']} yet."
 
     if kind == "layer":
         regions = ctx.get("top_regions") or []
@@ -744,7 +892,7 @@ def generate_basic_search_insight(ctx: dict, locale: str = "en") -> str:
                 lines.append(f"Top regions on the map: {top}.")
         total_area = ctx.get("total_area_km2")
         if total_area:
-            lines.append(f"Total mapped polygon area: {total_area:.2f} km².")
+            lines.append(f"Total mapped mineral area: {total_area:.2f} km².")
         return " ".join(lines)
 
     if kind == "mineral":
@@ -758,7 +906,7 @@ def generate_basic_search_insight(ctx: dict, locale: str = "en") -> str:
                 lines.append(f"Mikoa kuu: {top}.")
         else:
             lines = [
-                f"{ctx['search_name']} appears across {ctx['feature_count']} mapped zones on Terra Meta.",
+                f"{ctx['search_name']} appears across {ctx['feature_count']} mapped areas on Terra Meta.",
             ]
             if regions:
                 top = ", ".join(_format_region_stat_line(r) for r in regions[:4])
@@ -766,9 +914,9 @@ def generate_basic_search_insight(ctx: dict, locale: str = "en") -> str:
         total_area = ctx.get("total_area_km2")
         if total_area:
             if locale == "sw":
-                lines.append(f"Jumla ya eneo la poligoni lililopangwa: {total_area:.2f} km².")
+                lines.append(f"Jumla ya eneo la madini lililopangwa: {total_area:.2f} km².")
             else:
-                lines.append(f"Total mapped polygon area: {total_area:.2f} km².")
+                lines.append(f"Total mapped mineral area: {total_area:.2f} km².")
         desc = (ctx.get("description") or "").strip()
         if desc:
             lines.append(desc)
@@ -781,11 +929,191 @@ def generate_basic_search_insight(ctx: dict, locale: str = "en") -> str:
             f"{ctx['search_name']} ina maeneo {ctx['feature_count']} yaliyopangwa. "
             f"Madini kwenye ramani: {mineral_line}."
         )
-    mineral_line = ", ".join(f"{m['name']} ({m['count']} zones)" for m in minerals[:5]) or "none"
+    mineral_line = ", ".join(f"{m['name']} ({m['count']} areas)" for m in minerals[:5]) or "none"
     return (
-        f"{ctx['search_name']} has {ctx['feature_count']} mapped zones. "
+        f"{ctx['search_name']} has {ctx['feature_count']} mapped areas. "
         f"Minerals on the map: {mineral_line}."
     )
+
+
+_COMPASS_SECTOR_RANGES: tuple[tuple[str, float, float], ...] = (
+    ("N", 337.5, 22.5),
+    ("NE", 22.5, 67.5),
+    ("E", 67.5, 112.5),
+    ("SE", 112.5, 157.5),
+    ("S", 157.5, 202.5),
+    ("SW", 202.5, 247.5),
+    ("W", 247.5, 292.5),
+    ("NW", 292.5, 337.5),
+)
+
+_COMPASS_SECTOR_ORDER = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+
+
+def _bearing_degrees(center_lat: float, center_lng: float, point_lat: float, point_lng: float) -> float:
+    phi1 = math.radians(center_lat)
+    phi2 = math.radians(point_lat)
+    d_lambda = math.radians(point_lng - center_lng)
+    x = math.sin(d_lambda) * math.cos(phi2)
+    y = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(d_lambda)
+    return (math.degrees(math.atan2(x, y)) + 360) % 360
+
+
+def _bearing_to_sector(bearing: float) -> str:
+    for label, start, end in _COMPASS_SECTOR_RANGES:
+        if start > end:
+            if bearing >= start or bearing < end:
+                return label
+        elif start <= bearing < end:
+            return label
+    return "N"
+
+
+def _sector_label_full(sector: str, locale: str = "en") -> str:
+    labels_en = {
+        "N": "north",
+        "NE": "northeast",
+        "E": "east",
+        "SE": "southeast",
+        "S": "south",
+        "SW": "southwest",
+        "W": "west",
+        "NW": "northwest",
+    }
+    labels_sw = {
+        "N": "kaskazini",
+        "NE": "kaskazini-mashariki",
+        "E": "mashariki",
+        "SE": "kusini-mashariki",
+        "S": "kusini",
+        "SW": "kusini-magharibi",
+        "W": "magharibi",
+        "NW": "kaskazini-magharibi",
+    }
+    table = labels_sw if locale == "sw" else labels_en
+    return table.get(sector, sector.lower())
+
+
+def _direction_distribution_parts(sectors: dict[str, int], locale: str = "en") -> list[str]:
+    parts: list[str] = []
+    for sector in _COMPASS_SECTOR_ORDER:
+        count = int(sectors.get(sector, 0) or 0)
+        if count:
+            parts.append(f"{count} {_sector_label_full(sector, locale)}")
+    return parts
+
+
+def _direction_summary_lines(
+    overall: dict[str, int],
+    by_mineral: list[dict],
+    *,
+    locale: str = "en",
+) -> list[str]:
+    lines: list[str] = []
+    total = sum(int(v or 0) for v in overall.values())
+    if total < 1:
+        return lines
+
+    parts = _direction_distribution_parts(overall, locale)
+    if parts:
+        if locale == "sw":
+            lines.append(
+                f"Maeneo {total} yaliyopangwa kulingana na kituo cha uchambuzi: {', '.join(parts)}."
+            )
+        else:
+            zone_word = "areas" if total != 1 else "area"
+            lines.append(
+                f"{total} mapped {zone_word} relative to the analysis center: {', '.join(parts)}."
+            )
+
+    for entry in by_mineral[:4]:
+        dominant_count = int(entry.get("dominant_count") or 0)
+        mineral_total = int(entry.get("count") or 0)
+        if mineral_total < 1 or dominant_count < 1:
+            continue
+        share = dominant_count / mineral_total
+        if mineral_total >= 2 and share < 0.5:
+            continue
+        name = entry.get("name") or entry.get("slug") or "Mineral"
+        direction = entry.get("dominant_direction") or _sector_label_full(
+            str(entry.get("dominant_sector") or "N"), locale
+        )
+        if locale == "sw":
+            lines.append(
+                f"**{name}** linazingatia upande wa {direction} "
+                f"({dominant_count} kati ya {mineral_total} maeneo)."
+            )
+        else:
+            lines.append(
+                f"**{name}** areas cluster toward the {direction} "
+                f"({dominant_count} of {mineral_total} areas)."
+            )
+
+    return lines
+
+
+def direction_insights_for_features(
+    features: list[MapFeature],
+    center_lat: float,
+    center_lng: float,
+    minerals_list: list[dict],
+    *,
+    locale: str = "en",
+) -> dict | None:
+    """Compass-sector distribution of mapped areas relative to the analysis center."""
+    if not features:
+        return None
+
+    overall: dict[str, int] = defaultdict(int)
+    by_slug: dict[str, dict] = {}
+
+    for feature in features:
+        point_lat, point_lng = feature_sample_point(feature)
+        if not point_lat and not point_lng:
+            continue
+        sector = _bearing_to_sector(_bearing_degrees(center_lat, center_lng, point_lat, point_lng))
+        overall[sector] += 1
+        mineral = feature.layer.mineral if feature.layer else None
+        slug = mineral.slug if mineral else "unknown"
+        name = localized_name(mineral, locale) if mineral else "Unknown"
+        if slug not in by_slug:
+            by_slug[slug] = {"name": name, "sectors": defaultdict(int)}
+        by_slug[slug]["sectors"][sector] += 1
+
+    if not overall:
+        return None
+
+    by_mineral: list[dict] = []
+    mineral_order = {m.get("slug"): idx for idx, m in enumerate(minerals_list)}
+    for slug, payload in sorted(
+        by_slug.items(),
+        key=lambda item: (mineral_order.get(item[0], 999), -sum(item[1]["sectors"].values())),
+    ):
+        sectors = {key: int(value) for key, value in payload["sectors"].items()}
+        total = sum(sectors.values())
+        if total < 1:
+            continue
+        dominant_sector, dominant_count = max(sectors.items(), key=lambda item: item[1])
+        mineral_meta = next((m for m in minerals_list if m.get("slug") == slug), {})
+        by_mineral.append(
+            {
+                "slug": slug,
+                "name": mineral_meta.get("name") or payload["name"],
+                "count": total,
+                "sectors": sectors,
+                "dominant_sector": dominant_sector,
+                "dominant_direction": _sector_label_full(dominant_sector, locale),
+                "dominant_count": dominant_count,
+            }
+        )
+
+    summary_lines = _direction_summary_lines(overall, by_mineral, locale=locale)
+    return {
+        "center": {"lat": center_lat, "lng": center_lng},
+        "sectors": dict(overall),
+        "by_mineral": by_mineral,
+        "summary_lines": summary_lines,
+    }
 
 
 def _feature_region_name(feature: MapFeature, lat: float, lng: float) -> str | None:
@@ -798,22 +1126,42 @@ def _feature_region_name(feature: MapFeature, lat: float, lng: float) -> str | N
     return region_at_point(lat, lng)
 
 
+def _layer_influence_radius_km(layer: MapLayer, zone_km2: float) -> float:
+    """Per-layer influence radius: configured buffer or default analysis area."""
+    from .map_view_area import analysis_zone_radius_km
+
+    if layer.buffer_km:
+        return float(layer.buffer_km)
+    return analysis_zone_radius_km(zone_km2)
+
+
+def _feature_distance_to_point_km(feature: MapFeature, lat: float, lng: float) -> float:
+    if feature.geometry:
+        distance = distance_geometry_to_point_km(lat, lng, feature.geometry)
+        if math.isfinite(distance):
+            return distance
+    if feature.latitude is not None and feature.longitude is not None:
+        from .map_view_area import haversine_km
+
+        return haversine_km(lat, lng, feature.latitude, feature.longitude)
+    return float("inf")
+
+
 def _feature_in_analysis_zone(
     feature: MapFeature,
     lat: float,
     lng: float,
     area_km2: float,
 ) -> bool:
-    from .map_view_area import analysis_zone_radius_km, haversine_km
+    from .map_view_area import haversine_km
 
-    radius_km = analysis_zone_radius_km(area_km2)
+    radius_km = _layer_influence_radius_km(feature.layer, area_km2)
+    if _feature_distance_to_point_km(feature, lat, lng) <= radius_km:
+        return True
+
     lat_delta, lng_delta = analysis_zone_deltas_degrees(lat, area_km2)
     lat_min, lat_max = lat - lat_delta, lat + lat_delta
     lng_min, lng_max = lng - lng_delta, lng + lng_delta
-
-    if feature.latitude is not None and feature.longitude is not None:
-        if haversine_km(lat, lng, feature.latitude, feature.longitude) <= radius_km:
-            return True
 
     bbox = geometry_bbox(feature.geometry)
     if bbox:
@@ -832,6 +1180,79 @@ def _feature_in_analysis_zone(
         feature.layer.layer_type,
         12,
     )
+
+
+def _max_influence_radius_km(user, zone_km2: float) -> float:
+    from .map_view_area import analysis_zone_radius_km
+
+    base = analysis_zone_radius_km(zone_km2)
+    buffered = (
+        _accessible_layers(user)
+        .exclude(buffer_km__isnull=True)
+        .order_by("-buffer_km")
+        .values_list("buffer_km", flat=True)
+        .first()
+    )
+    if buffered:
+        return max(base, float(buffered))
+    return base
+
+
+def _expand_matches_with_reference_buffers(
+    anchors: list[MapFeature],
+    matched: list[MapFeature],
+    user,
+) -> tuple[list[MapFeature], list[dict]]:
+    """Include influencing features within each anchor layer's reference buffer."""
+    seen = {feature.id for feature in matched}
+    references: list[dict] = []
+    buffered_anchors = [anchor for anchor in anchors if anchor.layer.buffer_km]
+    if not buffered_anchors:
+        return matched, references
+
+    all_features = _accessible_feature_list(user, limit=5000)
+    for anchor in buffered_anchors:
+        buffer_km = float(anchor.layer.buffer_km)
+        alat, alng = feature_sample_point(anchor)
+        references.append(
+            {
+                "layer_name": anchor.layer.name,
+                "buffer_km": int(buffer_km),
+                "anchor_label": anchor.label or f"Feature {anchor.id}",
+                "lat": alat,
+                "lng": alng,
+            }
+        )
+        for feature in all_features:
+            if feature.id in seen:
+                continue
+            if _feature_distance_to_point_km(feature, alat, alng) <= buffer_km:
+                seen.add(feature.id)
+                matched.append(feature)
+
+    return matched, references
+
+
+def features_in_analysis_zone(
+    user,
+    lat: float,
+    lng: float,
+    zoom: int = 12,
+    *,
+    feature_ids: list[int] | None = None,
+    analysis_area_km2: float | None = None,
+) -> list[MapFeature]:
+    """Mapped features that fall inside the analysis area for exports and snapshots."""
+    zone_km2 = analysis_area_km2 or included_analysis_km2()
+    candidates = _area_insight_candidates(
+        lat,
+        lng,
+        zoom,
+        user,
+        feature_ids,
+        analysis_area_km2=zone_km2,
+    )
+    return [feature for feature in candidates if _feature_in_analysis_zone(feature, lat, lng, zone_km2)]
 
 
 def _area_insight_candidates(
@@ -865,7 +1286,9 @@ def _area_insight_candidates(
     candidates: list[MapFeature] = []
 
     zone_km2 = analysis_area_km2 or included_analysis_km2()
-    lat_delta, lng_delta = analysis_zone_deltas_degrees(lat, zone_km2)
+    max_radius_km = _max_influence_radius_km(user, zone_km2)
+    lat_delta = max_radius_km / 111.0
+    lng_delta = max_radius_km / max(111.0 * abs(math.cos(math.radians(lat))), 1e-6)
     lat_min, lat_max = lat - lat_delta, lat + lat_delta
     lng_min, lng_max = lng - lng_delta, lng + lng_delta
     delta = max(lat_delta, lng_delta)
@@ -929,6 +1352,7 @@ def area_location_context(
     *,
     analysis_area_km2: float | None = None,
     admin_boundary_id: int | None = None,
+    exploration_geometry: dict | None = None,
     country_code: str = "TZ",
 ) -> dict:
     from apps.geography.admin_boundary_service import lookup_boundaries_at_point
@@ -942,8 +1366,21 @@ def area_location_context(
         admin_boundary = AdminBoundary.objects.filter(id=admin_boundary_id).first()
 
     matched: list[MapFeature] = []
+    anchor_features: list[MapFeature] = []
+    reference_buffers: list[dict] = []
+    scoped_to_exploration = False
 
-    if feature_ids:
+    if exploration_geometry:
+        exploration_matched = features_in_exploration_scope(
+            _accessible_feature_list(user, limit=5000),
+            exploration_geometry,
+        )
+        if exploration_matched:
+            matched = exploration_matched
+            insight_scope = "exploration_area"
+            scoped_to_exploration = True
+
+    if feature_ids and not scoped_to_exploration:
         for feature in _accessible_features(user).select_related("layer", "layer__mineral", "layer__region").filter(
             id__in=feature_ids
         )[:50]:
@@ -955,11 +1392,26 @@ def area_location_context(
                 zoom,
             ):
                 matched.append(feature)
+                anchor_features.append(feature)
+
+    if matched and anchor_features and not scoped_to_exploration:
+        matched, reference_buffers = _expand_matches_with_reference_buffers(
+            anchor_features,
+            matched,
+            user,
+        )
+        if reference_buffers:
+            insight_scope = "reference_buffer"
 
     if not matched and admin_boundary:
-        matched = features_in_boundary(admin_boundary, _accessible_feature_list(user, limit=5000))
-        insight_scope = "admin_boundary"
-    elif not matched:
+        boundary_matched = features_in_boundary(
+            admin_boundary, _accessible_feature_list(user, limit=5000)
+        )
+        if boundary_matched:
+            matched = boundary_matched
+            insight_scope = "admin_boundary"
+
+    if not matched:
         candidates = _area_insight_candidates(
             lat,
             lng,
@@ -970,8 +1422,6 @@ def area_location_context(
         )
         for feature in candidates:
             if not _feature_in_analysis_zone(feature, lat, lng, zone_km2):
-                continue
-            if admin_boundary and not _feature_in_admin_boundary(feature, admin_boundary.geometry):
                 continue
             matched.append(feature)
 
@@ -1004,13 +1454,25 @@ def area_location_context(
         if region_counts
         else (admin_lookup.get("region") or {}).get("name") or region_at_point(lat, lng, country_code)
     )
+    top_regions = [
+        {"region": name, "count": count}
+        for name, count in sorted(region_counts.items(), key=lambda x: x[1], reverse=True)[:8]
+    ]
 
     district_info = admin_lookup.get("district")
     region_info = admin_lookup.get("region")
     ward_info = admin_lookup.get("ward")
     village_info = admin_lookup.get("village")
 
-    return {
+    direction_insights = direction_insights_for_features(
+        matched,
+        lat,
+        lng,
+        minerals_list,
+        locale=locale,
+    )
+
+    result = {
         "lat": lat,
         "lng": lng,
         "zoom": zoom,
@@ -1026,14 +1488,55 @@ def area_location_context(
         "has_mapped_data": len(matched) > 0,
         "analysis_area_km2": zone_km2,
         "insight_scope": insight_scope,
+        "reference_buffers": reference_buffers,
+        "top_regions": top_regions,
+        "exploration_geometry": exploration_geometry,
+        "direction_insights": direction_insights,
     }
+    result["country_code"] = country_code
+    from apps.geography.geology_context import attach_geological_context
+
+    attach_geological_context(
+        result,
+        locale=locale,
+        boundary_id=admin_boundary_id if insight_scope == "admin_boundary" else None,
+    )
+    return result
+
+
+def enrich_area_insight_context(
+    ctx: dict,
+    *,
+    basemap: str | None = None,
+    locale: str = "en",
+) -> dict:
+    """Attach basemap framing and DEM terrain metrics to an area insight context."""
+    from .basemap_metadata import basemap_ai_block, basemap_label, normalize_basemap
+    from .terrain_context import build_terrain_context
+
+    bid = normalize_basemap(basemap)
+    if bid:
+        ctx["basemap"] = bid
+        ctx["basemap_label"] = basemap_label(bid, locale=locale)
+        ctx["basemap_insight_hint"] = basemap_ai_block(bid, locale=locale)
+
+    terrain = build_terrain_context(
+        float(ctx["lat"]),
+        float(ctx["lng"]),
+        analysis_area_km2=ctx.get("analysis_area_km2"),
+        locale=locale,
+    )
+    if terrain:
+        ctx["terrain_context"] = terrain
+
+    return ctx
 
 
 def _commodity_summary_line(commodity: dict) -> str:
-    line = f"{commodity['name']} ({commodity['count']} zones"
+    line = f"{commodity['name']} ({commodity['count']} areas"
     area = commodity.get("area_km2")
     if area:
-        line += f", {area:.2f} km² polygon area"
+        line += f", {area:.2f} km² mineral area"
     return f"{line})"
 
 
@@ -1068,7 +1571,7 @@ def build_area_ai_context(ctx: dict) -> str:
     zone = ctx.get("analysis_area_km2") or included_analysis_km2()
     mineral_lines = ", ".join(
         _commodity_summary_line(m) for m in ctx.get("minerals", [])
-    ) or "No mapped zones in this analysis area"
+    ) or "No mapped areas in this analysis area"
     labels = ", ".join(ctx.get("labels", [])[:5]) or "none"
     region = ctx.get("region") or "not assigned"
     geo = ctx.get("geographic_region") or region
@@ -1082,21 +1585,73 @@ def build_area_ai_context(ctx: dict) -> str:
             or {}
         )
         boundary_name = boundary.get("name") or geo
-        scope_line = f"Mapped zones within administrative boundary: {boundary_name}\n"
+        scope_line = f"Mapped areas within administrative boundary: {boundary_name}\n"
+    elif ctx.get("insight_scope") == "reference_buffer":
+        refs = ctx.get("reference_buffers") or []
+        ref_lines = "\n".join(
+            (
+                f"Reference buffer: {ref['layer_name']} — {ref['buffer_km']} km around "
+                f"{ref['anchor_label']} ({ref['lat']:.4f}, {ref['lng']:.4f})"
+            )
+            for ref in refs
+        )
+        scope_line = (
+            f"Analysis anchored on mapped feature(s); influencing factors within reference buffer(s):\n"
+            f"{ref_lines}\n"
+        )
+    elif ctx.get("insight_scope") == "exploration_area":
+        scope_line = (
+            "Analysis limited to the user's drawn exploration area on the map. "
+            "Do not describe minerals or areas outside this geometry.\n"
+        )
     else:
         scope_line = (
-            f"Analysis zone: {zone:.1f} km² square centered on {ctx['lat']:.4f}, {ctx['lng']:.4f} "
+            f"Analysis area: {zone:.1f} km² square centered on {ctx['lat']:.4f}, {ctx['lng']:.4f} "
             f"(zoom {ctx['zoom']})\n"
         )
     admin_block = f"{admin_lines}\n" if admin_lines else ""
+    direction = ctx.get("direction_insights") or {}
+    direction_block = ""
+    if direction.get("sectors"):
+        sector_bits = ", ".join(
+            f"{sector}={direction['sectors'].get(sector, 0)}"
+            for sector in _COMPASS_SECTOR_ORDER
+            if direction["sectors"].get(sector, 0)
+        )
+        direction_block = f"Compass distribution from analysis center (sector counts): {sector_bits}\n"
+        for entry in direction.get("by_mineral") or []:
+            direction_block += (
+                f"- {entry.get('name')}: dominant {entry.get('dominant_direction')} "
+                f"({entry.get('dominant_count')} of {entry.get('count')} areas)\n"
+            )
+        for line in direction.get("summary_lines") or []:
+            direction_block += f"- {line}\n"
+        direction_block += (
+            "Describe spatial clustering using these compass directions when relevant.\n"
+        )
+    geology_block = ""
+    geology = ctx.get("geological_context") or {}
+    if geology.get("ai_block"):
+        geology_block = f"{geology['ai_block']}\n"
+    basemap_block = ""
+    if ctx.get("basemap_insight_hint"):
+        basemap_block = f"{ctx['basemap_insight_hint']}\n"
+    terrain_block = ""
+    terrain = ctx.get("terrain_context") or {}
+    if terrain.get("ai_block"):
+        terrain_block = f"{terrain['ai_block']}\n"
     return (
         f"{scope_line}"
         f"{admin_block}"
+        f"{basemap_block}"
+        f"{terrain_block}"
+        f"{direction_block}"
+        f"{geology_block}"
         f"Administrative region at click: {geo}\n"
-        f"Mapped zone region (from feature data): {region}\n"
-        f"Minerals in this analysis zone (mapped data only): {mineral_lines}\n"
-        f"Mapped zone count in zone: {ctx['feature_count']}\n"
-        f"Zone labels: {labels}\n"
+        f"Mapped area region (from feature data): {region}\n"
+        f"Minerals in this analysis area (mapped data only): {mineral_lines}\n"
+        f"Mapped area count in this analysis area: {ctx['feature_count']}\n"
+        f"Area labels: {labels}\n"
         f"Country: Tanzania\n"
         f"Important: Only describe the location and minerals listed above. Do not infer geology for other areas.\n"
     )
@@ -1112,59 +1667,305 @@ def generate_unmapped_insight(lat: float, lng: float, locale: str = "en") -> str
     return (
         f"No proven mineral mapping or reports are available for this exact location "
         f"({lat:.3f}, {lng:.3f}).\n"
-        "Click inside a mapped polygon, on a mapped line, or on a mapped point, "
+        "Click inside a mapped mineral, on a mapped structure, or on another mapped mineral, "
         "or explore a region with published layers."
     )
 
 
+def _location_label(ctx: dict, locale: str = "en") -> str:
+    village = (ctx.get("village_boundary") or {}).get("name")
+    district = (ctx.get("district_boundary") or {}).get("name")
+    geo = ctx.get("geographic_region") or ctx.get("region") or ""
+    if village:
+        return f"{village}, {geo}" if geo else village
+    if district:
+        return f"{district}, {geo}" if geo else district
+    return geo or ("Eneo lililochaguliwa" if locale == "sw" else "Selected area")
+
+
+def _scope_narrative(scope: str, locale: str = "en") -> str:
+    if locale == "sw":
+        return {
+            "reference_buffer": (
+                "Uchambuzi huu umeunganishwa na tabaka za marejeleo zilizo karibu na eneo ulilochagua, "
+                "ikiwa ni pamoja na maeneo yaliyopangwa ndani ya radi za buffer zilizowekwa kwenye tabaka."
+            ),
+            "exploration_area": (
+                "Uchambuzi huu umefungwa ndani ya eneo lako la uchunguzi ulilochora kwenye ramani."
+            ),
+            "admin_boundary": (
+                "Uchambuzi huu unajumuisha maeneo yaliyopangwa ndani ya mpaka wa utawala uliochaguliwa."
+            ),
+        }.get(
+            scope,
+            "Uchambuzi huu unazingatia maeneo yaliyopangwa ndani ya eneo la utafiti lililozunguka mahali ulipobofya.",
+        )
+    return {
+        "reference_buffer": (
+            "This review incorporates mapped indicators from reference layers near your selected point, "
+            "including prospects within configured buffer distances on those layers."
+        ),
+        "exploration_area": (
+            "This review is constrained to mapped features inside your drawn exploration geometry."
+        ),
+        "admin_boundary": (
+            "This review aggregates mapped prospects within the selected administrative boundary."
+        ),
+    }.get(
+        scope,
+        "This review considers mapped mineral prospects within the circular analysis area around your selected point.",
+    )
+
+
+def _mineral_exploration_notes(slug: str, name: str, locale: str = "en") -> str:
+    token = f"{slug} {name}".lower()
+    notes_en = {
+        "zinc": (
+            "Zinc targets on regional maps typically justify structural-lithological mapping, "
+            "soil and rock-chip geochemistry, and IP or resistivity grids to trace sulphide "
+            "halos before trenching or scout drilling."
+        ),
+        "uranium": (
+            "Uranium indicators call for radiometric surveying, detailed alteration mapping, "
+            "and early engagement on environmental and licensing requirements before any ground disturbance."
+        ),
+        "gold": (
+            "Gold prospects merit regolith-aware soil sampling, stream sediment follow-up, "
+            "and structural interpretation of the mapped footprint before RAB or RC drilling."
+        ),
+        "copper": (
+            "Copper occurrences often respond to induced polarization and magnetics; combine "
+            "geophysics with petrographic work on any outcrop or artisanal workings in the mineral area."
+        ),
+        "nickel": (
+            "Nickel targets may relate to ultramafic or lateritic settings; auger or pit sampling "
+            "for Ni and associated pathfinders should precede deeper drilling."
+        ),
+        "iron": (
+            "Iron mapping mineral areas support magnetic surveying and pitting to confirm grade continuity "
+            "and stripping ratios for potential DSO or magnetite projects."
+        ),
+        "coal": (
+            "Coal indicators require stratigraphic section measurement, core or trench confirmation, "
+            "and assessment of basin continuity and infrastructure access."
+        ),
+        "graphite": (
+            "Graphite prospects benefit from mapping of graphitic schists or gneisses, grab sampling "
+            "for carbon grade, and metallurgical scoping early in the program."
+        ),
+        "lithium": (
+            "Lithium targets may be pegmatite-hosted or brine-related; field work should confirm "
+            "mineral assemblages and use appropriate geochem paths (Li, Cs, Ta, Rb) before drilling."
+        ),
+    }
+    notes_sw = {
+        "zinc": (
+            "Malengo ya zinki huahidi uchambuzi wa kimuundo, jeochemistry ya udongo na miamba, "
+            "na gridi za IP/resistivity kabla ya trenching au uchunguzi wa mashimo."
+        ),
+        "uranium": (
+            "Viashiria vya urani vinahitaji uchunguzi wa radiometriki, uainishaji wa mabadiliko "
+            "ya mwamba, na uthibitishaji wa leseni na mazingira mapema."
+        ),
+        "gold": (
+            "Malengo ya dhahabu vinahitaji sampuli za udongo, sediment za mito, na tafsiri ya "
+            "kimuundo kabla ya kuchimba mashimo ya uchunguzi."
+        ),
+    }
+    catalog = notes_sw if locale == "sw" else notes_en
+    for key, note in catalog.items():
+        if key in token:
+            return note
+    if locale == "sw":
+        return (
+            f"Kwa {name}, panga ramani ya shamba, sampuli za jeochemistry, gridi za geophysiki "
+            f"inazofaa kwa bidhaa hiyo, na uthibitishaji wa leseni kabla ya uamuzi wa kuchimba."
+        )
+    return (
+        f"For {name}, plan reconnaissance mapping, commodity-appropriate geochemical sampling, "
+        f"targeted geophysical grids, and tenure verification before committing to drill holes."
+    )
+
+
+def _insight_contradicts_mapped_data(text: str, ctx: dict) -> bool:
+    if not ctx.get("has_mapped_data") or not ctx.get("minerals"):
+        return False
+    lower = (text or "").lower()
+    bad_phrases = (
+        "no mapped areas",
+        "no mapped area",
+        "no proven mineral",
+        "no minerals",
+        "nothing mapped",
+    )
+    return any(phrase in lower for phrase in bad_phrases)
+
+
 def generate_basic_map_insight(ctx: dict, locale: str = "en") -> str:
-    """Template-based insight from proven mapped features at the click point only."""
+    """Rich geological exploration narrative from mapped features in the analysis scope."""
     if not ctx.get("has_mapped_data"):
         return generate_unmapped_insight(ctx["lat"], ctx["lng"], locale)
 
     minerals = ctx.get("minerals", [])
-    region = ctx.get("region") or ("Haijulikani" if locale == "sw" else "Unassigned")
+    geo = ctx.get("geographic_region") or ctx.get("region") or ("Haijulikani" if locale == "sw" else "Unassigned")
+    location = _location_label(ctx, locale=locale)
     admin_lines = _admin_hierarchy_lines(ctx, locale=locale)
+    zone_km2 = ctx.get("analysis_area_km2")
+    scope = ctx.get("insight_scope") or "analysis_zone"
+    feature_count = int(ctx.get("feature_count") or 0)
+    labels = ctx.get("labels") or []
+    lat, lng = ctx.get("lat"), ctx.get("lng")
+    paragraphs: list[str] = []
 
     if locale == "sw":
-        lines = []
+        opening = (
+            f"Muhtasari wa kijiolojia wa uchunguzi kwa **{location}**, mkoa wa **{geo}**, Tanzania. "
+            f"{_scope_narrative(scope, locale)}"
+        )
+        if zone_km2:
+            opening += f" Eneo la utafiti lina takriban **{zone_km2:,.0f} km²**."
+        if lat is not None and lng is not None:
+            opening += f" Kituo cha uchambuzi: {float(lat):.4f}, {float(lng):.4f}."
+        paragraphs.append(opening)
+
         if admin_lines:
-            lines.append(admin_lines)
-        lines.extend([
-            f"Mkoa (kutoka data iliyopangwa): {region}",
-            (
-                f"Maeneo {ctx.get('feature_count', 0)} yaliyopangwa katika eneo hili"
-                if ctx.get("insight_scope") == "admin_boundary"
-                else f"Maeneo {ctx.get('feature_count', 0)} yaliyopangwa mahali ulipobofya"
-            ),
-        ])
-    else:
-        lines = []
-        if admin_lines:
-            lines.append(admin_lines)
-        lines.extend([
-            f"Mapped region: {region}",
-            (
-                f"{ctx.get('feature_count', 0)} mapped zone(s) in this area"
-                if ctx.get("insight_scope") == "admin_boundary"
-                else f"{ctx.get('feature_count', 0)} mapped zone(s) at your click point"
-            ),
-        ])
-    for m in minerals[:4]:
-        line = f"• {m['name']}: {m['count']} zone(s)"
-        if m.get("area_km2"):
-            if locale == "sw":
-                line += f", {m['area_km2']:.2f} km² jumla ya poligoni"
-            else:
-                line += f", {m['area_km2']:.2f} km² total polygon area"
-        lines.append(line)
-    labels = ctx.get("labels") or []
-    if labels:
-        if locale == "sw":
-            lines.append(f"Maeneo: {', '.join(labels[:3])}")
+            paragraphs.append(admin_lines)
+
+        coverage = (
+            f"Data iliyopangwa inaonyesha **{feature_count}** "
+            f"{'eneo la uchunguzi' if feature_count == 1 else 'maeneo ya uchunguzi'} ndani ya upeo huu"
+        )
+        if len(minerals) == 1:
+            m = minerals[0]
+            mname = m.get("name") or m.get("slug") or "Madini"
+            mcount = int(m.get("count") or 0)
+            coverage += f", likiwa na **{mname}** kama bidhaa kuu ({mcount} eneo"
+            if m.get("area_km2"):
+                coverage += f", **{float(m['area_km2']):,.2f} km²** ya poligoni iliyopangwa"
+            coverage += "). Poligoni hizi ni viashiria vya uwezekano, si makadirio ya akiba."
         else:
-            lines.append(f"Zones include: {', '.join(labels[:3])}")
-    return "\n".join(lines)
+            coverage += f", na **{len(minerals)}** aina za madini zilizotambuliwa."
+            coverage += " Poligoni zinaonyesha uwezekano wa uchunguzi, si makadirio ya rasilimali."
+        paragraphs.append(coverage + ".")
+
+        if minerals:
+            commodity_bits = []
+            for m in minerals[:4]:
+                mname = m.get("name") or m.get("slug") or "Madini"
+                mcount = int(m.get("count") or 0)
+                bit = f"**{mname}** ({mcount} eneo"
+                if m.get("area_km2"):
+                    bit += f", {float(m['area_km2']):,.2f} km²"
+                bit += f"): {_mineral_exploration_notes(m.get('slug', ''), mname, locale)}"
+                commodity_bits.append(bit)
+            paragraphs.append(" ".join(commodity_bits))
+
+        if labels:
+            paragraphs.append(
+                f"Lebo za maeneo yaliyopangwa ni pamoja na: {', '.join(labels[:5])}. "
+                "Linganisha majina haya na hati za leseni na ramani za shamba."
+            )
+
+        for line in (ctx.get("direction_insights") or {}).get("summary_lines") or []:
+            paragraphs.append(line)
+
+        for line in (ctx.get("terrain_context") or {}).get("summary_lines") or []:
+            paragraphs.append(line)
+
+        for line in (ctx.get("geological_context") or {}).get("summary_lines") or []:
+            paragraphs.append(line)
+
+        paragraphs.append(
+            "Hatua zinazopendekezwa: (1) ukaguzi wa leseni na mipaka ya ardhi; "
+            "(2) ramani ya shamba na sampuli za jeochemistry; (3) gridi za geophysiki inazohitajika; "
+            "(4) trenching au mashimo ya uchunguzi baada ya kuthibitisha lengo. "
+            "Ripoti hii inategemea tabaka zilizochapishwa kwenye Terra Meta na haijumuishi matokeo ya kuchimba wala makadirio ya akiba."
+        )
+    else:
+        opening = (
+            f"**Geological exploration summary** for **{location}** in the **{geo}** region, Tanzania. "
+            f"{_scope_narrative(scope, locale)}"
+        )
+        if zone_km2:
+            opening += f" The analysis covers approximately **{zone_km2:,.0f} km²** of ground."
+        if lat is not None and lng is not None:
+            opening += f" Reference coordinates: {float(lat):.5f}°N, {float(lng):.5f}°E."
+        paragraphs.append(opening)
+
+        if admin_lines:
+            paragraphs.append(admin_lines)
+
+        if feature_count == 1 and len(minerals) == 1:
+            m = minerals[0]
+            mname = m.get("name") or m.get("slug") or "Unknown"
+            mcount = int(m.get("count") or 0)
+            coverage = (
+                f"Terra Meta maps **{mcount}** prospect area for **{mname}** in this scope"
+            )
+            if m.get("area_km2"):
+                coverage += f", with **{float(m['area_km2']):,.2f} km²** of mapped mineral coverage"
+            coverage += (
+                ". The mineral area outlines an exploration target from published platform layers — "
+                "it is not a resource estimate and must be validated with field geology, sampling, "
+                "and geophysics."
+            )
+        else:
+            coverage = (
+                f"The mapped dataset records **{feature_count}** prospect areas spanning "
+                f"**{len(minerals)}** commodities in this area. Mineral areas represent exploration "
+                "indicators from curated layers, not JORC/NI 43-101 resources."
+            )
+        paragraphs.append(coverage)
+
+        if minerals:
+            geo_bits = []
+            for m in minerals[:4]:
+                mname = m.get("name") or m.get("slug") or "Unknown"
+                mcount = int(m.get("count") or 0)
+                lead = f"**{mname}** ({mcount} area{'s' if mcount != 1 else ''}"
+                if m.get("area_km2"):
+                    lead += f", {float(m['area_km2']):,.2f} km² mapped"
+                lead += f"): {_mineral_exploration_notes(m.get('slug', ''), mname, locale)}"
+                geo_bits.append(lead)
+            paragraphs.append(" ".join(geo_bits))
+
+        if labels:
+            paragraphs.append(
+                f"Mapped area labels include: {', '.join(labels[:5])}. "
+                "Cross-check these names against mining cadastre records and any available geological survey memoirs."
+            )
+
+        for line in (ctx.get("direction_insights") or {}).get("summary_lines") or []:
+            paragraphs.append(line)
+
+        for line in (ctx.get("terrain_context") or {}).get("summary_lines") or []:
+            paragraphs.append(line)
+
+        for line in (ctx.get("geological_context") or {}).get("summary_lines") or []:
+            paragraphs.append(line)
+
+        if feature_count <= 2:
+            paragraphs.append(
+                "With limited but focused coverage, this area suits a rank-1 desktop review followed by "
+                "a short field campaign: licence confirmation, structural mapping of the mapped footprint, "
+                "and infill geochemistry on a grid scaled to the mineral area size."
+            )
+        else:
+            paragraphs.append(
+                "Multiple mapped areas suggest a camp-scale review: prioritise targets by mineral area, "
+                "commodity mix, and access, then sequence ground programs from reconnaissance through "
+                "targeted geophysics and scout drilling."
+            )
+
+        paragraphs.append(
+            "Recommended work program: (1) tenure and environmental screening; (2) geological mapping and "
+            "lithostructural interpretation of each mineral area; (3) soil or rock-chip geochemistry and "
+            "commodity-appropriate geophysics; (4) trenching or drill testing of the strongest targets. "
+            "This insight is generated from Terra Meta mapped layers only and does not include drill "
+            "intercepts, resource models, or economic studies."
+        )
+
+    return "\n\n".join(paragraphs)
 
 
 def build_platform_ai_context(locale: str = "en") -> str:
@@ -1182,5 +1983,5 @@ def build_platform_ai_context(locale: str = "en") -> str:
         f"Product: Terra Meta, a mineral intelligence platform.\n"
         f"Map minerals include: {names or 'several commodities'}.\n"
         "Free tier: browse the map and ask about the platform here.\n"
-        "Paid: zone labels, analytics, location Terra insights on map clicks, report downloads."
+        "Paid: area labels, analytics, location Terra insights on map clicks, report downloads."
     )

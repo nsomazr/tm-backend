@@ -9,10 +9,13 @@ from django.core.mail import EmailMultiAlternatives
 from django.utils import timezone
 
 from .email_templates import otp_email_html, otp_email_text
-from .models import EmailOTP, User
+from .beem_sms import send_sms
+from .models import EmailOTP, PhoneOTP, User
+from .phone_utils import normalize_tz_phone
 
 
 OTP_TTL_MINUTES = 1
+OTP_SMS_TTL_MINUTES = 5
 OTP_RESEND_SECONDS = 60
 OTP_LENGTH = 6
 OTP_SEND_HOUR_LIMIT = 10
@@ -37,28 +40,47 @@ def _generate_username(email: str) -> str:
     return candidate
 
 
-def _send_hour_cache_key(email: str) -> str:
-    return f"otp_send_hour:{email}"
+def _generate_username_from_phone(phone: str) -> str:
+    suffix = phone[-9:]
+    base = f"user{suffix}"[:20]
+    candidate = base
+    n = 0
+    while User.objects.filter(username=candidate).exists():
+        n += 1
+        candidate = f"{base}{n}"[:150]
+    return candidate
 
 
-def _verify_fail_cache_key(email: str, purpose: str) -> str:
-    return f"otp_verify_fail:{email}:{purpose}"
+def _find_user_by_phone(phone: str) -> User | None:
+    normalized = normalize_tz_phone(phone)
+    if not normalized:
+        return None
+    local = f"0{normalized[3:]}"
+    return User.objects.filter(phone__in=[normalized, local]).first()
 
 
-def _check_verify_lockout(email: str, purpose: str) -> None:
-    failures = cache.get(_verify_fail_cache_key(email, purpose), 0)
+def _send_hour_cache_key(identifier: str) -> str:
+    return f"otp_send_hour:{identifier}"
+
+
+def _verify_fail_cache_key(identifier: str, purpose: str) -> str:
+    return f"otp_verify_fail:{identifier}:{purpose}"
+
+
+def _check_verify_lockout(identifier: str, purpose: str) -> None:
+    failures = cache.get(_verify_fail_cache_key(identifier, purpose), 0)
     if failures >= OTP_VERIFY_MAX_ATTEMPTS:
         raise ValueError("Too many failed attempts. Request a new code and try again later.")
 
 
-def _record_verify_failure(email: str, purpose: str) -> None:
-    key = _verify_fail_cache_key(email, purpose)
+def _record_verify_failure(identifier: str, purpose: str) -> None:
+    key = _verify_fail_cache_key(identifier, purpose)
     failures = cache.get(key, 0) + 1
     cache.set(key, failures, OTP_VERIFY_LOCKOUT_SECONDS)
 
 
-def _clear_verify_failures(email: str, purpose: str) -> None:
-    cache.delete(_verify_fail_cache_key(email, purpose))
+def _clear_verify_failures(identifier: str, purpose: str) -> None:
+    cache.delete(_verify_fail_cache_key(identifier, purpose))
 
 
 def send_email_otp(email: str, purpose: str) -> None:
@@ -144,6 +166,87 @@ def verify_email_otp(email: str, code: str, purpose: str) -> tuple[User, bool]:
         user.set_unusable_password()
         user.save()
         created = True
+
+    return user, created
+
+
+def send_phone_otp(phone: str, purpose: str) -> None:
+    phone = normalize_tz_phone(phone)
+    if not phone:
+        raise ValueError("Enter a valid Tanzania mobile number.")
+
+    latest = (
+        PhoneOTP.objects.filter(phone=phone, purpose=purpose)
+        .order_by("-created_at")
+        .first()
+    )
+    if latest and latest.created_at > timezone.now() - timedelta(seconds=OTP_RESEND_SECONDS):
+        wait = OTP_RESEND_SECONDS - int((timezone.now() - latest.created_at).total_seconds())
+        raise ValueError(f"Please wait {max(wait, 1)} seconds before requesting another code.")
+
+    hour_key = _send_hour_cache_key(f"phone:{phone}")
+    send_count = cache.get(hour_key, 0)
+    if send_count >= OTP_SEND_HOUR_LIMIT:
+        raise ValueError("Too many verification codes requested. Try again later.")
+
+    PhoneOTP.objects.filter(phone=phone, purpose=purpose, used=False).update(used=True)
+
+    code = _generate_code()
+    expires_at = timezone.now() + timedelta(minutes=OTP_SMS_TTL_MINUTES)
+    PhoneOTP.objects.create(phone=phone, code=code, purpose=purpose, expires_at=expires_at)
+    cache.set(hour_key, send_count + 1, 3600)
+
+    sms = (
+        f"Your Terra Meta verification code is: {code}. "
+        f"It will expire in {OTP_SMS_TTL_MINUTES} minutes."
+    )
+    send_sms(phone, sms)
+    logger.info("OTP SMS dispatched to %s (purpose=%s)", phone, purpose)
+
+
+def verify_phone_otp(phone: str, code: str, purpose: str) -> tuple[User, bool]:
+    phone = normalize_tz_phone(phone)
+    if not phone:
+        raise ValueError("Enter a valid Tanzania mobile number.")
+    code = code.strip()
+    _check_verify_lockout(f"phone:{phone}", purpose)
+
+    otp = (
+        PhoneOTP.objects.filter(
+            phone=phone,
+            code=code,
+            purpose=purpose,
+            used=False,
+            expires_at__gt=timezone.now(),
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if not otp:
+        _record_verify_failure(f"phone:{phone}", purpose)
+        raise ValueError("Invalid or expired code.")
+
+    otp.used = True
+    otp.save(update_fields=["used"])
+    _clear_verify_failures(f"phone:{phone}", purpose)
+
+    user = _find_user_by_phone(phone)
+    created = False
+    if not user:
+        if purpose == PhoneOTP.Purpose.LOGIN:
+            raise ValueError("No account found for this phone number.")
+        user = User.objects.create(
+            username=_generate_username_from_phone(phone),
+            phone=phone,
+            role=User.Role.FREE,
+            profile_complete=False,
+        )
+        user.set_unusable_password()
+        user.save()
+        created = True
+    elif not user.phone:
+        user.phone = phone
+        user.save(update_fields=["phone"])
 
     return user, created
 

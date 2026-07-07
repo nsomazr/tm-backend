@@ -23,6 +23,7 @@ class Command(BaseCommand):
         monthly.included_report_downloads = 3
         monthly.included_assistant_credits = 3000
         monthly.includes_chat_history = True
+        monthly.includes_saved_explorations = True
         monthly.max_explorable_minerals = 10
         monthly.description = (
             "More access to advanced Terra insights: 10 mineral deep-explores per month"
@@ -37,6 +38,7 @@ class Command(BaseCommand):
                 "included_report_downloads",
                 "included_assistant_credits",
                 "includes_chat_history",
+                "includes_saved_explorations",
                 "max_explorable_minerals",
             ]
         )
@@ -54,6 +56,7 @@ class Command(BaseCommand):
         annual.included_report_downloads = 10
         annual.included_assistant_credits = 5000
         annual.includes_chat_history = True
+        annual.includes_saved_explorations = True
         annual.max_explorable_minerals = None
         annual.description = (
             "Unlimited mineral exploration all year with full Terra intelligence"
@@ -68,6 +71,7 @@ class Command(BaseCommand):
                 "included_report_downloads",
                 "included_assistant_credits",
                 "includes_chat_history",
+                "includes_saved_explorations",
                 "max_explorable_minerals",
             ]
         )

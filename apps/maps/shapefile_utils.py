@@ -12,6 +12,7 @@ from typing import Any
 
 import shapefile
 
+from .csv_import import csv_bytes_to_features
 from .crs_utils import ensure_wgs84_geometry
 from .upload_security import (
     UploadValidationError,
@@ -32,6 +33,8 @@ def detect_file_type(filename: str) -> str:
         return "geojson"
     if lower.endswith(".json"):
         return "json"
+    if lower.endswith(".csv"):
+        return "csv"
     return "geojson"
 
 
@@ -47,6 +50,8 @@ def parse_upload_content(
         validate_upload_bytes(content, filename, boundary=boundary)
         if ft == "shapefile" or filename.lower().endswith(".shp"):
             features = shapefile_bytes_to_features(content)
+        elif ft == "csv" or filename.lower().endswith(".csv"):
+            features = csv_bytes_to_features(content)
         elif ft == "zip" or filename.lower().endswith(".zip"):
             features = _parse_zip(content)
         else:
@@ -92,6 +97,11 @@ def _parse_zip(content: bytes) -> list[dict[str, Any]]:
                 continue
             if name.lower().endswith((".geojson", ".json")):
                 return _normalize_features(_load_json_bytes(zf.read(name)))
+        for name in names:
+            if _is_mac_junk(name):
+                continue
+            if name.lower().endswith(".csv"):
+                return csv_bytes_to_features(zf.read(name))
         shp_names = [n for n in names if _is_valid_shp_entry(n)]
         errors: list[str] = []
         for shp_name in sorted(shp_names, key=lambda n: zf.getinfo(n).file_size, reverse=True):
@@ -105,7 +115,9 @@ def _parse_zip(content: bytes) -> list[dict[str, Any]]:
             raise ValueError(
                 "No readable shapefile found in ZIP. " + "; ".join(errors[:2])
             )
-    raise ValueError("ZIP must contain a .shp set (.shp + .shx + .dbf) or a GeoJSON file.")
+    raise ValueError(
+        "ZIP must contain a .shp set (.shp + .shx + .dbf), a GeoJSON file, or a .csv file."
+    )
 
 
 def _collect_shapefile_parts(zf: zipfile.ZipFile, shp_name: str) -> dict[str, bytes]:

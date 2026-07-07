@@ -13,7 +13,12 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.analytics.aerial import extension_price, included_aerial_km2, max_billable_extra_km2
+from apps.analytics.aerial import (
+    clamp_analysis_km2,
+    extension_price,
+    included_aerial_km2,
+    max_billable_extra_km2,
+)
 
 from apps.accounts.permissions import IsAdminUser, IsSuperAdmin
 from apps.compliance.models import LicenseAgreement
@@ -90,7 +95,7 @@ def _build_checkout_order(request, data):
         amount = extension_price(extra_km2)
         currency = "TZS"
         purchased_extra = int(math.ceil(extra_km2))
-        max_area_km2 = included_aerial_km2() + purchased_extra
+        max_area_km2 = clamp_analysis_km2(included_aerial_km2() + purchased_extra)
 
     merchant_reference = uuid.uuid4().hex
     gateway_meta = {}

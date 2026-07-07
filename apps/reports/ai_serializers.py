@@ -95,6 +95,7 @@ class ReportAiAssistSerializer(serializers.Serializer):
     current_executive_summary = serializers.CharField(required=False, allow_blank=True)
     current_key_findings = StringListField(required=False)
     messages = ChatMessagesField(required=False)
+    enable_web_search = serializers.CharField(required=False, allow_blank=True, default="false")
 
     def validated_chat_messages(self) -> list[dict[str, str]]:
         instruction = (self.validated_data.get("instruction") or "").strip()
@@ -117,6 +118,10 @@ class ReportAiAssistSerializer(serializers.Serializer):
         if not summary and not findings:
             return None
         return {"executive_summary": summary, "key_findings": findings}
+
+    def validated_enable_web_search(self) -> bool:
+        raw = self.validated_data.get("enable_web_search") or "false"
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
     @classmethod
     def from_request(cls, request):

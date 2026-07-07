@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import base64
 import re
 from html import unescape
 from html.parser import HTMLParser
@@ -16,11 +17,13 @@ from reportlab.lib.enums import TA_JUSTIFY
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
-from reportlab.platypus import ListFlowable, ListItem, Paragraph, SimpleDocTemplate, Spacer
+from reportlab.platypus import Image, ListFlowable, ListItem, Paragraph, SimpleDocTemplate, Spacer
 
 from .models import Report
+from .report_text_utils import KEY_FINDINGS_HEADING, REFERENCES_HEADING, filter_report_findings
 
-KEY_FINDINGS_HEADING = "key findings"
+_KEY_FINDINGS_HEADING_LOWER = KEY_FINDINGS_HEADING.lower()
+_REFERENCES_HEADING_LOWER = REFERENCES_HEADING.lower()
 
 
 def _brand_logo_path() -> Path | None:
@@ -87,6 +90,37 @@ def _color_from_style(style: str) -> str | None:
     return _normalize_color(match.group(1))
 
 
+def _figure_width_fraction(class_name: str) -> float:
+    if "report-editor-figure--width-small" in class_name:
+        return 0.25
+    if "report-editor-figure--width-large" in class_name:
+        return 0.75
+    if "report-editor-figure--width-full" in class_name or "report-editor-figure--align-full" in class_name:
+        return 1.0
+    return 0.5
+
+
+def _figure_halign(class_name: str) -> str:
+    if "report-editor-figure--align-left" in class_name:
+        return "LEFT"
+    if "report-editor-figure--align-right" in class_name:
+        return "RIGHT"
+    return "CENTER"
+
+
+def _decode_image_src(src: str) -> bytes | None:
+    src = (src or "").strip()
+    if not src:
+        return None
+    match = re.match(r"data:image/(?:png|jpe?g|gif|webp);base64,(.+)", src, re.I | re.S)
+    if match:
+        try:
+            return base64.b64decode(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
 def _open_inline_tag(tag: str, attrs: list[tuple[str, str | None]]) -> str:
     tag = tag.lower()
     attr_map = {key.lower(): value for key, value in attrs}
@@ -132,9 +166,21 @@ class _ReportPdfHtmlParser(HTMLParser):
         self._list_items: list[str] = []
         self._in_li = False
         self._li_buffer: list[str] = []
+        self._figure_class = ""
+        self._figure_src = ""
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
+        attr_map = {key.lower(): value for key, value in attrs}
+        if tag == "figure":
+            self._flush()
+            self._mode = "figure"
+            self._figure_class = attr_map.get("class") or ""
+            self._figure_src = ""
+            return
+        if tag == "img" and self._mode == "figure":
+            self._figure_src = attr_map.get("src") or ""
+            return
         if tag in ("h2", "h3"):
             self._flush()
             self._mode = tag
@@ -164,6 +210,19 @@ class _ReportPdfHtmlParser(HTMLParser):
 
     def handle_endtag(self, tag):
         tag = tag.lower()
+        if tag == "figure":
+            if self._figure_src:
+                self.blocks.append(
+                    {
+                        "type": "image",
+                        "src": self._figure_src,
+                        "class": self._figure_class,
+                    }
+                )
+            self._mode = None
+            self._figure_class = ""
+            self._figure_src = ""
+            return
         if tag in ("h2", "h3"):
             text = "".join(self._buffer).strip()
             if text:
@@ -220,11 +279,21 @@ class _ReportPdfHtmlParser(HTMLParser):
                 self.blocks.append({"type": "heading", "level": level, "text": text})
         elif self._mode == "list" and self._list_items:
             self.blocks.append({"type": "list", "items": self._list_items})
+        elif self._mode == "figure" and self._figure_src:
+            self.blocks.append(
+                {
+                    "type": "image",
+                    "src": self._figure_src,
+                    "class": self._figure_class,
+                }
+            )
         self._mode = None
         self._buffer = []
         self._list_items = []
         self._in_li = False
         self._li_buffer = []
+        self._figure_class = ""
+        self._figure_src = ""
 
     def close(self):
         super().close()
@@ -234,7 +303,7 @@ class _ReportPdfHtmlParser(HTMLParser):
 def _parse_plain_summary_blocks(text: str) -> list[dict]:
     blocks: list[dict] = []
     for paragraph in [part.strip() for part in text.split("\n\n") if part.strip()]:
-        if paragraph.lower() == KEY_FINDINGS_HEADING:
+        if paragraph.lower() == _KEY_FINDINGS_HEADING_LOWER:
             blocks.append({"type": "heading", "level": 2, "text": paragraph})
             continue
         if len(paragraph) < 80 and paragraph == paragraph.title() and " " in paragraph:
@@ -261,9 +330,15 @@ def _split_body_and_findings(blocks: list[dict]) -> tuple[list[dict], list[str]]
     in_findings = False
 
     for block in blocks:
-        if block.get("type") == "heading" and str(block.get("text", "")).strip().lower() == KEY_FINDINGS_HEADING:
-            in_findings = True
-            continue
+        if block.get("type") == "heading":
+            heading = str(block.get("text", "")).strip().lower()
+            if heading == _KEY_FINDINGS_HEADING_LOWER:
+                in_findings = True
+                continue
+            if in_findings and heading == _REFERENCES_HEADING_LOWER:
+                in_findings = False
+                body.append(block)
+                continue
         if in_findings:
             if block.get("type") == "list":
                 findings.extend(str(item).strip() for item in block.get("items", []) if str(item).strip())
@@ -274,7 +349,7 @@ def _split_body_and_findings(blocks: list[dict]) -> tuple[list[dict], list[str]]
             continue
         body.append(block)
 
-    return body, findings
+    return body, filter_report_findings(findings)
 
 
 def _wrap_text(text: str, style: ParagraphStyle) -> Paragraph:
@@ -294,6 +369,7 @@ def _append_summary_blocks(
     subsection_style: ParagraphStyle,
     body_style: ParagraphStyle,
     bullet_style: ParagraphStyle,
+    content_width: float,
 ) -> None:
     for block in blocks:
         block_type = block.get("type")
@@ -317,6 +393,21 @@ def _append_summary_blocks(
             ]
             if items:
                 story.append(ListFlowable(items, bulletType="bullet", start="•"))
+            continue
+        if block_type == "image":
+            src = str(block.get("src", "")).strip()
+            raw = _decode_image_src(src)
+            if not raw:
+                continue
+            class_name = str(block.get("class", ""))
+            width = content_width * _figure_width_fraction(class_name)
+            try:
+                image = Image(io.BytesIO(raw), width=width, height=width * 0.62)
+                image.hAlign = _figure_halign(class_name)
+                story.append(image)
+                story.append(Spacer(1, 0.12 * inch))
+            except Exception:
+                continue
 
 
 def build_report_pdf_bytes(report: Report) -> bytes:
@@ -335,7 +426,7 @@ def build_report_pdf_bytes(report: Report) -> bytes:
         topMargin=1.05 * inch,
         bottomMargin=0.95 * inch,
         title=report.title,
-        author="Terra Meta · 5G Geology",
+        author="Terra Meta · 5G Geology Futures",
     )
 
     styles = getSampleStyleSheet()
@@ -407,7 +498,7 @@ def build_report_pdf_bytes(report: Report) -> bytes:
     story.append(_wrap_text(f"Region: {region_name}", subtitle_style))
     story.append(
         _wrap_text(
-            f"Generated: {timezone.now().strftime('%d %B %Y')} · Terra Meta Mineral Intelligence Platform",
+            f"Generated: {timezone.now().strftime('%d %B %Y')} · Terra Meta Mineral Intelligence",
             meta_style,
         )
     )
@@ -422,6 +513,7 @@ def build_report_pdf_bytes(report: Report) -> bytes:
     body_blocks, embedded_findings = _split_body_and_findings(summary_blocks)
 
     if body_blocks:
+        content_width = doc.width
         _append_summary_blocks(
             story,
             body_blocks,
@@ -429,6 +521,7 @@ def build_report_pdf_bytes(report: Report) -> bytes:
             subsection_style=subsection_style,
             body_style=body_style,
             bullet_style=bullet_style,
+            content_width=content_width,
         )
     elif summary_html:
         plain = _html_to_report_text(summary_html)
@@ -439,9 +532,11 @@ def build_report_pdf_bytes(report: Report) -> bytes:
                 if chunk:
                     story.append(_wrap_text(chunk, body_style))
 
-    findings = list(summary_obj.key_findings if summary_obj and summary_obj.key_findings else [])
+    findings = filter_report_findings(
+        list(summary_obj.key_findings if summary_obj and summary_obj.key_findings else [])
+    )
     if embedded_findings:
-        findings = embedded_findings
+        findings = filter_report_findings(embedded_findings)
     elif not findings and summary_html:
         plain = _html_to_report_text(summary_html)
         findings = [line.strip("- •") for line in plain.split("\n") if line.strip().startswith(("-", "•"))][:12]
@@ -471,7 +566,7 @@ def build_report_pdf_bytes(report: Report) -> bytes:
         )
     )
     story.append(Spacer(1, 0.12 * inch))
-    story.append(_wrap_text("© Terra Meta · 5G Geology · terrameta.5ggeology.com", meta_style))
+    story.append(_wrap_text("© Terra Meta · 5G Geology Futures · terrameta.5ggeology.com", meta_style))
 
     def _draw_page(canvas, doc_template):
         canvas.saveState()
@@ -504,7 +599,7 @@ def build_report_pdf_bytes(report: Report) -> bytes:
         footer_text_y = 0.42 * inch
         canvas.setFont("Helvetica", 8)
         canvas.setFillColor(colors.HexColor("#64748b"))
-        canvas.drawString(left, footer_text_y, "Terra Meta · Mineral Intelligence Platform")
+        canvas.drawString(left, footer_text_y, "Terra Meta · Mineral Intelligence")
 
         page_label = f"Page {doc_template.page}"
         icon_size = 0.42 * inch

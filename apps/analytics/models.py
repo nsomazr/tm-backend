@@ -138,3 +138,30 @@ class MineralExplorationLog(models.Model):
 
     def __str__(self):
         return f"{self.user_id} · {self.mineral_slug}"
+
+
+class AssistantPlatformSettings(models.Model):
+    """Singleton assistant / intelligence provider preferences (API keys stay in env)."""
+
+    class Provider(models.TextChoices):
+        GROQ = "groq", "Groq"
+        GEMINI = "gemini", "Gemini"
+        OLLAMA = "ollama", "Ollama"
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1)
+    ai_provider = models.CharField(max_length=20, blank=True, default="")
+    ai_provider_fallback = models.CharField(max_length=120, blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Assistant platform settings"
+        verbose_name_plural = "Assistant platform settings"
+
+    def __str__(self):
+        primary = self.ai_provider or "env default"
+        return f"Assistant settings (primary: {primary})"
+
+    @classmethod
+    def get_solo(cls):
+        obj, _ = cls.objects.get_or_create(pk=1, defaults={"ai_provider": "", "ai_provider_fallback": ""})
+        return obj

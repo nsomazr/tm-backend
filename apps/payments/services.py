@@ -12,6 +12,7 @@ from django.conf import settings
 
 from apps.accounts.models import User
 from apps.analytics.models import AerialAnalysisGrant
+from apps.compliance.models import LicenseAgreement
 from apps.subscriptions.models import DownloadPurchase, UserSubscription
 
 from .models import Invoice, PaymentOrder
@@ -94,6 +95,22 @@ def _order_description(order):
     return order_description(order)
 
 
+def _cancel_other_subscriptions(user, active_sub):
+    """End prior active/pending subscriptions when a new plan is activated."""
+    today = date.today()
+    UserSubscription.objects.filter(
+        user=user,
+        status=UserSubscription.Status.ACTIVE,
+    ).exclude(pk=active_sub.pk).update(
+        status=UserSubscription.Status.CANCELLED,
+        end_date=today,
+    )
+    UserSubscription.objects.filter(
+        user=user,
+        status=UserSubscription.Status.PENDING,
+    ).exclude(pk=active_sub.pk).update(status=UserSubscription.Status.CANCELLED)
+
+
 def activate_order(order, transaction_data=None):
     order.status = PaymentOrder.Status.COMPLETED
     if transaction_data:
@@ -102,6 +119,7 @@ def activate_order(order, transaction_data=None):
 
     if order.order_type == PaymentOrder.OrderType.SUBSCRIPTION and order.subscription:
         sub = order.subscription
+        _cancel_other_subscriptions(order.user, sub)
         sub.status = UserSubscription.Status.ACTIVE
         sub.start_date = date.today()
         cycle_days = 365 if sub.plan.billing_cycle == "annual" else 30
@@ -138,6 +156,14 @@ def activate_order(order, transaction_data=None):
                 max_area_km2=float(aerial["max_area_km2"]),
                 purchased_extra_km2=float(aerial.get("purchased_extra_km2", 0)),
             )
+
+    elif order.order_type == PaymentOrder.OrderType.LICENSE and order.license_agreement:
+        license_agreement = order.license_agreement
+        license_agreement.status = LicenseAgreement.Status.ACTIVE
+        license_agreement.start_date = date.today()
+        if not license_agreement.end_date or license_agreement.end_date < date.today():
+            license_agreement.end_date = date.today() + timedelta(days=365)
+        license_agreement.save(update_fields=["status", "start_date", "end_date"])
 
     generate_invoice.delay(order.id)
 

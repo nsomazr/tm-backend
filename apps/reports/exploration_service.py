@@ -13,6 +13,7 @@ def _context_block_from_report(record: UserExplorationReport) -> str:
     user = record.user
     data = gather_insight_export_data(
         user,
+        mode="map" if ctx.get("lat") is not None and ctx.get("lng") is not None else "account",
         lat=ctx.get("lat"),
         lng=ctx.get("lng"),
         zoom=ctx.get("zoom"),
@@ -21,6 +22,7 @@ def _context_block_from_report(record: UserExplorationReport) -> str:
         layer_id=ctx.get("layer_id"),
         boundary_id=ctx.get("boundary_id"),
         feature_ids=ctx.get("feature_ids"),
+        exploration_geometry=ctx.get("exploration_geometry"),
         locale=ctx.get("locale", "en"),
     )
     return _build_data_context_block(data)

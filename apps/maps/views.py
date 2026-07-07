@@ -26,7 +26,7 @@ from .access import (
 )
 from .filters import MapLayerFilter
 from .models import LayerUpload, LayerVersion, MapFeature, MapLayer, MapPlatformSettings, SavedExploration
-from .map_settings import is_valid_coordinate_system
+from apps.maps.map_settings import DEFAULT_COORDINATE_SYSTEM, is_valid_coordinate_system
 from .shapefile_utils import detect_file_type
 from .upload_security import (
     UploadValidationError,
@@ -326,10 +326,17 @@ class MapLayerViewSet(viewsets.ModelViewSet):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         file_type = request.data.get("file_type") or detect_file_type(upload_file.name)
+        import_mode = request.data.get("import_mode", LayerUpload.ImportMode.REPLACE)
+        if import_mode not in LayerUpload.ImportMode.values:
+            return Response(
+                {"detail": "import_mode must be 'replace' or 'append'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         upload = LayerUpload.objects.create(
             layer=layer,
             file=upload_file,
             file_type=file_type,
+            import_mode=import_mode,
             uploaded_by=request.user,
         )
         from apps.maps.tasks import process_layer_upload
@@ -351,6 +358,7 @@ class MapLayerViewSet(viewsets.ModelViewSet):
                 "layer_name": layer.name,
                 "mineral": layer.mineral.name,
                 "file_type": file_type,
+                "import_mode": import_mode,
             },
         )
         return Response(LayerUploadSerializer(upload).data, status=status.HTTP_202_ACCEPTED)
@@ -467,6 +475,7 @@ class SavedExplorationViewSet(viewsets.ModelViewSet):
 
     serializer_class = SavedExplorationSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = None
 
     def get_queryset(self):
         return SavedExploration.objects.filter(user=self.request.user)
@@ -482,10 +491,25 @@ class SavedExplorationViewSet(viewsets.ModelViewSet):
 @api_view(["GET", "PATCH"])
 @permission_classes([AllowAny])
 def map_platform_settings(request):
-    solo = MapPlatformSettings.get_solo()
+    from apps.geography.models import Country
+
+    country_code = (
+        (request.query_params.get("country") or request.data.get("country") or "TZ")
+        .strip()
+        .upper()
+    )
+    try:
+        country = Country.objects.get(code=country_code, is_active=True)
+    except Country.DoesNotExist:
+        return Response({"detail": "Country not found."}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method == "GET":
-        return Response({"coordinate_system": solo.coordinate_system})
+        return Response(
+            {
+                "country": country.code,
+                "coordinate_system": country.coordinate_system or DEFAULT_COORDINATE_SYSTEM,
+            }
+        )
 
     if not IsAdminUser().has_permission(request, None):
         return Response({"detail": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
@@ -496,13 +520,18 @@ def map_platform_settings(request):
             {"coordinate_system": ["Unknown or invalid coordinate system."]},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    solo.coordinate_system = crs
-    solo.save(update_fields=["coordinate_system", "updated_at"])
+    country.coordinate_system = crs
+    country.save(update_fields=["coordinate_system"])
     log_audit(
         request,
         "map_settings_update",
-        "MapPlatformSettings",
-        solo.pk,
-        {"coordinate_system": crs},
+        "Country",
+        country.pk,
+        {"country": country.code, "coordinate_system": crs},
     )
-    return Response({"coordinate_system": solo.coordinate_system})
+    return Response(
+        {
+            "country": country.code,
+            "coordinate_system": country.coordinate_system,
+        }
+    )

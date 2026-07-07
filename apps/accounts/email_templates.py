@@ -38,7 +38,7 @@ def otp_email_text(code: str, purpose: str, ttl_minutes: int) -> str:
         f"  {code}\n\n"
         f"This code expires in {_ttl_label(ttl_minutes)}.\n\n"
         f"If you did not request this, ignore this email.\n\n"
-        f"Terra Meta by 5G Geology\n"
+        f"Terra Meta by 5G Geology Futures\n"
         f"https://5ggeology.com"
     )
 
@@ -76,6 +76,6 @@ def subscription_reminder_text(name: str, plan_name: str, end_date, days_left: i
         f"Hello {name},\n\n"
         f"Your {plan_name} subscription renews in {days_left} day(s) (expires {end_date}).\n\n"
         f"Renew now to keep full access: {renew_url}\n\n"
-        f"Terra Meta by 5G Geology\n"
+        f"Terra Meta by 5G Geology Futures\n"
         f"https://5ggeology.com"
     )

@@ -7,9 +7,11 @@ from apps.maps.localization import get_request_locale, localized_name
 from .access import user_can_download_report, user_has_report_detail_access
 from .models import Report, ReportSummary, UserExplorationReport
 from .pdf_service import _html_to_report_text
+from .report_text_utils import filter_report_findings
 
 
 def _parse_key_findings(value) -> list[str]:
+    value = _coerce_json_form_value(value)
     if value is None:
         return []
     if isinstance(value, list):
@@ -33,8 +35,42 @@ def _parse_key_findings(value) -> list[str]:
     return []
 
 
+def _coerce_json_form_value(data):
+    """Multipart uploads sometimes wrap JSON strings in single-item lists."""
+    if isinstance(data, list) and len(data) == 1 and isinstance(data[0], str):
+        candidate = data[0].strip()
+        if candidate.startswith("[") or candidate.startswith("{"):
+            return candidate
+    return data
+
+
+REPORT_SLUG_MAX_LENGTH = 50
+
+
+def unique_report_slug(title: str, *, exclude_pk: int | None = None) -> str:
+    from django.utils.text import slugify
+
+    base = slugify(title) or "report"
+    base = base[:REPORT_SLUG_MAX_LENGTH].rstrip("-") or "report"
+
+    slug = base
+    counter = 1
+    qs = Report.objects.all()
+    if exclude_pk is not None:
+        qs = qs.exclude(pk=exclude_pk)
+
+    while qs.filter(slug=slug).exists():
+        suffix = f"-{counter}"
+        trimmed = base[: max(1, REPORT_SLUG_MAX_LENGTH - len(suffix))].rstrip("-") or "report"
+        slug = f"{trimmed}{suffix}"
+        counter += 1
+
+    return slug
+
+
 class JSONListField(serializers.ListField):
     def to_internal_value(self, data):
+        data = _coerce_json_form_value(data)
         if isinstance(data, str):
             try:
                 data = json.loads(data)
@@ -45,6 +81,7 @@ class JSONListField(serializers.ListField):
 
 class JSONDictField(serializers.JSONField):
     def to_internal_value(self, data):
+        data = _coerce_json_form_value(data)
         if isinstance(data, str):
             try:
                 data = json.loads(data)
@@ -325,7 +362,12 @@ class ReportAdminSerializer(serializers.ModelSerializer):
     def get_summary_preview(self, obj):
         if hasattr(obj, "ai_summary") and obj.ai_summary:
             text = _html_to_report_text(obj.ai_summary.summary or "")
-            return text[:200] + ("…" if len(text) > 200 else "")
+            if text.strip():
+                return text[:200] + ("…" if len(text) > 200 else "")
+        if obj.source_type == Report.SourceType.UPLOADED:
+            fallback = (obj.description or obj.title or "").strip()
+            if fallback:
+                return fallback[:200] + ("…" if len(fallback) > 200 else "")
         return ""
 
     def get_linked_layers(self, obj):
@@ -423,29 +465,20 @@ class ReportAdminSerializer(serializers.ModelSerializer):
             "model_used": "manual",
         }
         if key_findings is not None:
-            defaults["key_findings"] = key_findings
+            defaults["key_findings"] = filter_report_findings(key_findings)
 
         ReportSummary.objects.update_or_create(report=report, defaults=defaults)
         self.context["manual_summary_saved"] = True
         return True
 
     def create(self, validated_data):
-        from django.utils.text import slugify
-
         executive_summary = validated_data.pop("executive_summary", "")
         key_findings = validated_data.pop("key_findings", None)
         layer_ids = validated_data.pop("layer_ids", None)
         boundary_ids = validated_data.pop("boundary_ids", None)
         allowed_plan_ids = validated_data.pop("allowed_plan_ids", None)
 
-        title = validated_data["title"]
-        base_slug = slugify(title)
-        slug = base_slug
-        counter = 1
-        while Report.objects.filter(slug=slug).exists():
-            slug = f"{base_slug}-{counter}"
-            counter += 1
-        validated_data["slug"] = slug
+        validated_data["slug"] = unique_report_slug(validated_data["title"])
 
         report = super().create(validated_data)
         self._save_m2m(report, layer_ids, boundary_ids, allowed_plan_ids)

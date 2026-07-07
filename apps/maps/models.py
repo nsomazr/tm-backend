@@ -1,5 +1,9 @@
 from django.conf import settings
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+
+BUFFER_KM_MIN = 1
+BUFFER_KM_MAX = 50
 
 
 class MapLayer(models.Model):
@@ -36,6 +40,18 @@ class MapLayer(models.Model):
         help_text="fill, stroke, strokeWidth, hatch pattern",
     )
     description = models.TextField(blank=True)
+    buffer_km = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[
+            MinValueValidator(BUFFER_KM_MIN),
+            MaxValueValidator(BUFFER_KM_MAX),
+        ],
+        help_text=(
+            "Optional reference buffer (km) around each feature. "
+            "Used when inferring map insights so nearby influencing factors are included."
+        ),
+    )
     current_version = models.PositiveIntegerField(default=1)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -119,6 +135,10 @@ class LayerUpload(models.Model):
         COMPLETED = "completed", "Completed"
         FAILED = "failed", "Failed"
 
+    class ImportMode(models.TextChoices):
+        REPLACE = "replace", "Replace existing"
+        APPEND = "append", "Add to existing"
+
     layer = models.ForeignKey(
         MapLayer,
         on_delete=models.CASCADE,
@@ -126,6 +146,11 @@ class LayerUpload(models.Model):
     )
     file = models.FileField(upload_to="layer_imports/")
     file_type = models.CharField(max_length=20, default="geojson")
+    import_mode = models.CharField(
+        max_length=20,
+        choices=ImportMode.choices,
+        default=ImportMode.REPLACE,
+    )
     status = models.CharField(
         max_length=20,
         choices=Status.choices,

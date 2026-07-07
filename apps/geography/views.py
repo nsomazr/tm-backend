@@ -5,6 +5,8 @@ from rest_framework.permissions import IsAuthenticatedOrReadOnly
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from django.db import models
+
 from apps.accounts.permissions import IsAdminUser
 from apps.accounts.throttling import AdminUploadThrottle
 from apps.maps.upload_security import (
@@ -23,8 +25,15 @@ from .admin_boundary_service import (
 from .boundary_import_job import get_import_status, start_boundary_import
 from .boundary_map_cache import build_village_display_cache, load_village_display_cache
 from .country_geo import country_focus_payload, ensure_country
-from .models import AdminBoundary, Country, Region
-from .serializers import CountrySerializer, RegionSerializer
+from .models import AdminBoundary, BoundaryGeologyDocument, Country, Region
+from .serializers import (
+    AdminBoundaryGeologySerializer,
+    AdminBoundaryGeologyUpdateSerializer,
+    AdminBoundaryListItemSerializer,
+    BoundaryGeologyDocumentSerializer,
+    CountrySerializer,
+    RegionSerializer,
+)
 
 
 class CountryViewSet(viewsets.ModelViewSet):
@@ -212,3 +221,111 @@ class AdminBoundaryListView(APIView):
                 "last_updated": qs.order_by("-updated_at").values_list("updated_at", flat=True).first(),
             }
         )
+
+
+class AdminBoundaryItemsView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        country_code = request.query_params.get("country", "TZ").upper()
+        level_raw = request.query_params.get("level")
+        query = (request.query_params.get("q") or "").strip()
+        qs = (
+            AdminBoundary.objects.filter(
+                country__code=country_code,
+                source=AdminBoundary.Source.ADMIN_UPLOAD,
+            )
+            .annotate(geology_document_count=models.Count("geology_documents"))
+            .order_by("level", "name")
+        )
+        if level_raw not in (None, ""):
+            try:
+                qs = qs.filter(level=int(level_raw))
+            except (TypeError, ValueError):
+                return Response({"detail": "level must be 0–4."}, status=status.HTTP_400_BAD_REQUEST)
+        if query:
+            qs = qs.filter(name__icontains=query)
+        qs = qs[:500]
+        serializer = AdminBoundaryListItemSerializer(qs, many=True)
+        return Response({"country": country_code, "results": serializer.data})
+
+
+class AdminBoundaryGeologyDetailView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get_object(self, boundary_id: int) -> AdminBoundary:
+        return AdminBoundary.objects.prefetch_related("geology_documents").get(
+            id=boundary_id,
+            source=AdminBoundary.Source.ADMIN_UPLOAD,
+        )
+
+    def get(self, request, boundary_id: int):
+        try:
+            boundary = self.get_object(boundary_id)
+        except AdminBoundary.DoesNotExist:
+            return Response({"detail": "Boundary not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(AdminBoundaryGeologySerializer(boundary).data)
+
+    def patch(self, request, boundary_id: int):
+        try:
+            boundary = self.get_object(boundary_id)
+        except AdminBoundary.DoesNotExist:
+            return Response({"detail": "Boundary not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = AdminBoundaryGeologyUpdateSerializer(boundary, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        boundary.refresh_from_db()
+        return Response(AdminBoundaryGeologySerializer(boundary).data)
+
+
+class AdminBoundaryGeologyDocumentView(APIView):
+    permission_classes = [IsAdminUser]
+    parser_classes = [MultiPartParser, FormParser]
+    throttle_classes = [AdminUploadThrottle]
+
+    def post(self, request, boundary_id: int):
+        try:
+            boundary = AdminBoundary.objects.get(
+                id=boundary_id,
+                source=AdminBoundary.Source.ADMIN_UPLOAD,
+            )
+        except AdminBoundary.DoesNotExist:
+            return Response({"detail": "Boundary not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        upload = request.FILES.get("file")
+        if not upload:
+            return Response({"detail": "file is required."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            validate_upload_filename(upload.name)
+            validate_upload_size(upload.size, boundary=False)
+            check_disk_headroom(boundary=False)
+        except UploadValidationError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        title = (request.data.get("title") or upload.name or "Geological reference").strip()[:200]
+        scope = (request.data.get("scope") or "local").strip().lower()
+        if scope not in ("local", "regional", "global"):
+            scope = "local"
+
+        from apps.reports.context_extraction import extract_text_from_upload
+
+        extracted = extract_text_from_upload(upload)
+        doc = BoundaryGeologyDocument.objects.create(
+            boundary=boundary,
+            title=title,
+            scope=scope,
+            file=upload,
+            extracted_text=extracted,
+            uploaded_by=request.user if request.user.is_authenticated else None,
+        )
+        return Response(BoundaryGeologyDocumentSerializer(doc).data, status=status.HTTP_201_CREATED)
+
+    def delete(self, request, boundary_id: int, document_id: int):
+        deleted, _ = BoundaryGeologyDocument.objects.filter(
+            id=document_id,
+            boundary_id=boundary_id,
+            boundary__source=AdminBoundary.Source.ADMIN_UPLOAD,
+        ).delete()
+        if not deleted:
+            return Response({"detail": "Document not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)

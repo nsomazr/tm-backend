@@ -7,7 +7,15 @@ from apps.minerals.models import Mineral
 
 from apps.minerals.color_utils import enrich_layer_style
 
-from .models import LayerUpload, LayerVersion, MapFeature, MapLayer, SavedExploration
+from .models import (
+    BUFFER_KM_MAX,
+    BUFFER_KM_MIN,
+    LayerUpload,
+    LayerVersion,
+    MapFeature,
+    MapLayer,
+    SavedExploration,
+)
 
 
 def _user_display_name(user) -> str | None:
@@ -153,6 +161,7 @@ class MapLayerSerializer(serializers.ModelSerializer):
             "is_active",
             "style",
             "description",
+            "buffer_km",
             "current_version",
             "feature_count",
             "created_by",
@@ -210,6 +219,15 @@ class MapLayerSerializer(serializers.ModelSerializer):
         if not layer_type and self.instance:
             layer_type = self.instance.layer_type
         return enrich_layer_style(value or {}, layer_type or "polygon")
+
+    def validate_buffer_km(self, value):
+        if value is None:
+            return value
+        if value < BUFFER_KM_MIN or value > BUFFER_KM_MAX:
+            raise serializers.ValidationError(
+                f"Buffer zone must be between {BUFFER_KM_MIN} and {BUFFER_KM_MAX} km."
+            )
+        return value
 
     def create(self, validated_data):
         layer = super().create(validated_data)
@@ -303,6 +321,7 @@ class LayerUploadSerializer(serializers.ModelSerializer):
             "mineral_name",
             "filename",
             "file_type",
+            "import_mode",
             "status",
             "error_message",
             "uploaded_by",

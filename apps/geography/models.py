@@ -18,6 +18,11 @@ class Country(models.Model):
         blank=True,
         help_text="GeoJSON geometry for country outline",
     )
+    coordinate_system = models.CharField(
+        max_length=32,
+        default="arc1960",
+        help_text="Default map coordinate reference system for this country.",
+    )
     is_active = models.BooleanField(default=True)
 
     class Meta:
@@ -79,6 +84,16 @@ class AdminBoundary(models.Model):
     )
     center_lat = models.FloatField(null=True, blank=True)
     center_lng = models.FloatField(null=True, blank=True)
+    geological_summary = models.TextField(
+        blank=True,
+        help_text="Local or regional geological summary for Terra insights (English).",
+    )
+    geological_summary_sw = models.TextField(blank=True)
+    geological_metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Structured geology: scope, formations, lithology, stratigraphy, age, data_sources.',
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -92,3 +107,34 @@ class AdminBoundary(models.Model):
 
     def __str__(self):
         return f"{self.name} (L{self.level}, {self.country.code})"
+
+
+class BoundaryGeologyDocument(models.Model):
+    class Scope(models.TextChoices):
+        LOCAL = "local", "Local"
+        REGIONAL = "regional", "Regional"
+        GLOBAL = "global", "Global reference"
+
+    boundary = models.ForeignKey(
+        AdminBoundary,
+        on_delete=models.CASCADE,
+        related_name="geology_documents",
+    )
+    title = models.CharField(max_length=200)
+    scope = models.CharField(max_length=20, choices=Scope.choices, default=Scope.LOCAL)
+    file = models.FileField(upload_to="boundary_geology/")
+    extracted_text = models.TextField(blank=True)
+    uploaded_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="boundary_geology_uploads",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.title} ({self.boundary.name})"

@@ -76,7 +76,7 @@ def _prepare_geometry(geometry: dict, layer: MapLayer) -> dict:
 
 
 def import_features_for_layer(layer: MapLayer, features_data: list, source: str = "import") -> int:
-    """Replace active features on a layer with parsed GeoJSON features."""
+    """Bulk-create parsed GeoJSON features on a layer. Returns count of new features."""
     new_features = []
     for feat in features_data:
         geom = _prepare_geometry(feat.get("geometry", {}), layer)
@@ -111,13 +111,15 @@ def process_layer_upload(upload_id):
         ft = upload.file_type
         if ft == "geojson" and detect_file_type(filename) == "shapefile":
             ft = "shapefile"
-        if ft in ("geojson", "json", "shapefile", "zip", ""):
+        if ft in ("geojson", "json", "shapefile", "zip", "csv", ""):
             features_data = parse_upload_content(content, filename, ft or None, boundary=False)
         else:
             features_data = parse_upload_content(content, filename, ft, boundary=False)
 
+        append = upload.import_mode == LayerUpload.ImportMode.APPEND
         with transaction.atomic():
-            layer.features.filter(is_active=True).update(is_active=False)
+            if not append:
+                layer.features.filter(is_active=True).update(is_active=False)
             count = import_features_for_layer(layer, features_data, source=filename)
 
             layer.current_version += 1
@@ -127,10 +129,11 @@ def process_layer_upload(upload_id):
                 update_fields.append("is_active")
             layer.save(update_fields=update_fields)
 
+            changelog = f"Append from {filename}" if append else f"Import from {filename}"
             LayerVersion.objects.create(
                 layer=layer,
                 version_number=layer.current_version,
-                changelog=f"Import from {filename}",
+                changelog=changelog,
                 uploaded_by=upload.uploaded_by,
                 feature_count=count,
             )

@@ -7,6 +7,8 @@ from rest_framework.views import APIView
 from apps.accounts.permissions import IsAdminUser
 from apps.accounts.throttling import PublicCatalogThrottleMixin
 from apps.analytics.credits import get_assistant_credit_quota
+from apps.analytics.models import AssistantCreditUsage
+from apps.reports.models import UserExplorationReport
 from apps.reports.access import get_subscription_download_quota
 
 from .models import DownloadPurchase, SubscriptionPlan, SubscriptionReportDownload, UserSubscription
@@ -95,6 +97,7 @@ class MyPurchasesView(APIView):
                     "purchased_at": purchase.purchased_at,
                     "amount_paid": purchase.amount_paid,
                     "currency": purchase.currency,
+                    "can_download": True,
                 }
             )
 
@@ -116,6 +119,53 @@ class MyPurchasesView(APIView):
                     "purchased_at": download.downloaded_at,
                     "amount_paid": None,
                     "currency": None,
+                    "can_download": True,
+                }
+            )
+
+        insight_exports = (
+            AssistantCreditUsage.objects.filter(
+                user=user,
+                kind=AssistantCreditUsage.Kind.REPORT_EXPORT,
+            )
+            .order_by("-created_at")[:100]
+        )
+        for export in insight_exports:
+            rows.append(
+                {
+                    "id": export.id,
+                    "report": 0,
+                    "report_slug": "",
+                    "report_title": "Terra insight area brief",
+                    "source": "insight_export",
+                    "purchased_at": export.created_at,
+                    "amount_paid": None,
+                    "currency": None,
+                    "can_download": False,
+                }
+            )
+
+        explorations = (
+            UserExplorationReport.objects.filter(user=user)
+            .exclude(status=UserExplorationReport.Status.DRAFT)
+            .order_by("-created_at")[:100]
+        )
+        for exploration in explorations:
+            rows.append(
+                {
+                    "id": exploration.id,
+                    "report": exploration.id,
+                    "report_slug": str(exploration.id),
+                    "report_title": exploration.title or f"Exploration report #{exploration.id}",
+                    "source": "exploration",
+                    "purchased_at": exploration.created_at,
+                    "amount_paid": None,
+                    "currency": None,
+                    "status": exploration.status,
+                    "can_download": bool(
+                        exploration.status == UserExplorationReport.Status.READY
+                        and exploration.pdf_file
+                    ),
                 }
             )
 

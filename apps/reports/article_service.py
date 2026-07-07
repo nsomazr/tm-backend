@@ -6,6 +6,12 @@ import re
 from html.parser import HTMLParser
 from html import unescape
 
+from .report_text_utils import KEY_FINDINGS_HEADING, filter_report_findings, is_citation_like_finding
+
+
+def _looks_like_reference_item(text: str) -> bool:
+    return is_citation_like_finding(text)
+
 
 def _strip_html(text: str) -> str:
     if not text:
@@ -110,12 +116,45 @@ def _parse_plain_summary(text: str) -> list[dict]:
     return blocks
 
 
+def _sanitize_article_blocks(blocks: list[dict]) -> list[dict]:
+    """Keep bibliographic titles out of Key Findings lists in published articles."""
+    result: list[dict] = []
+    in_findings = False
+
+    for block in blocks:
+        block_type = block.get("type")
+        if block_type == "heading":
+            heading = str(block.get("text", "")).strip().lower()
+            if heading == KEY_FINDINGS_HEADING.lower():
+                in_findings = True
+                result.append(block)
+                continue
+            if heading.startswith("references"):
+                in_findings = False
+            result.append(block)
+            continue
+
+        if in_findings and block_type == "list":
+            items = [
+                str(item).strip()
+                for item in block.get("items", [])
+                if str(item).strip() and not _looks_like_reference_item(str(item))
+            ]
+            if items:
+                result.append({**block, "items": items})
+            continue
+
+        result.append(block)
+
+    return result
+
+
 def build_article_body_from_report(report) -> list[dict]:
     summary = ""
     findings: list[str] = []
     if hasattr(report, "ai_summary") and report.ai_summary:
         summary = report.ai_summary.summary or ""
-        findings = list(report.ai_summary.key_findings or [])
+        findings = filter_report_findings(list(report.ai_summary.key_findings or []))
 
     blocks: list[dict] = [
         {"type": "heading", "level": 1, "text": report.title},
@@ -126,19 +165,27 @@ def build_article_body_from_report(report) -> list[dict]:
 
     if summary:
         if "<" in summary:
-            blocks.extend(_parse_html_summary(summary))
+            blocks.extend(_sanitize_article_blocks(_parse_html_summary(summary)))
         else:
-            blocks.extend(_parse_plain_summary(summary))
+            blocks.extend(_sanitize_article_blocks(_parse_plain_summary(summary)))
 
     if findings:
         has_findings_heading = any(
             block.get("type") == "heading"
-            and str(block.get("text", "")).strip().lower() == "key findings"
+            and str(block.get("text", "")).strip().lower() == KEY_FINDINGS_HEADING.lower()
             for block in blocks
         )
-        if not has_findings_heading:
-            blocks.append({"type": "heading", "level": 2, "text": "Key findings"})
-        blocks.append({"type": "list", "items": findings})
+        has_findings_list = any(
+            block.get("type") == "list"
+            and any(
+                not _looks_like_reference_item(str(item))
+                for item in block.get("items", [])
+            )
+            for block in blocks
+        )
+        if not has_findings_heading and not has_findings_list:
+            blocks.append({"type": "heading", "level": 2, "text": KEY_FINDINGS_HEADING})
+            blocks.append({"type": "list", "items": findings})
 
     mineral_name = report.mineral.name if report.mineral_id else ""
     region_name = report.region.name if report.region_id else ""

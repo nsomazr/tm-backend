@@ -122,9 +122,13 @@ class DownloadPurchaseSerializer(serializers.ModelSerializer):
 class MyReportSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     report = serializers.IntegerField()
-    report_slug = serializers.CharField()
+    report_slug = serializers.CharField(allow_blank=True)
     report_title = serializers.CharField()
-    source = serializers.ChoiceField(choices=("purchase", "subscription"))
+    source = serializers.ChoiceField(
+        choices=("purchase", "subscription", "insight_export", "exploration")
+    )
     purchased_at = serializers.DateTimeField(allow_null=True)
     amount_paid = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
-    currency = serializers.CharField(required=False, allow_null=True)
+    currency = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    status = serializers.CharField(required=False, allow_blank=True)
+    can_download = serializers.BooleanField(required=False, default=False)

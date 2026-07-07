@@ -216,3 +216,51 @@ def feature_contains_click(
         zoom=zoom,
         layer_type=layer_type,
     )
+
+
+def distance_geometry_to_point_km(
+    lat: float,
+    lng: float,
+    geometry: dict[str, Any] | None,
+) -> float:
+    """Shortest distance (km) from a WGS84 point to any GeoJSON geometry."""
+    if not geometry or "type" not in geometry:
+        return float("inf")
+
+    gtype = geometry["type"]
+    coords = geometry.get("coordinates")
+    if not coords:
+        return float("inf")
+
+    if gtype == "Point":
+        return haversine_km(lat, lng, coords[1], coords[0])
+
+    if gtype == "MultiPoint":
+        return min(haversine_km(lat, lng, c[1], c[0]) for c in coords)
+
+    if gtype == "LineString":
+        return _distance_to_linestring_km(lat, lng, coords)
+
+    if gtype == "MultiLineString":
+        return min(_distance_to_linestring_km(lat, lng, line) for line in coords)
+
+    if gtype == "Polygon":
+        if _point_in_ring(lng, lat, coords[0]):
+            return 0.0
+        ring = coords[0]
+        if len(ring) < 2:
+            return float("inf")
+        return min(
+            _distance_point_to_segment_km(
+                lat, lng, ring[i][1], ring[i][0], ring[i + 1][1], ring[i + 1][0]
+            )
+            for i in range(len(ring) - 1)
+        )
+
+    if gtype == "MultiPolygon":
+        return min(
+            distance_geometry_to_point_km(lat, lng, {"type": "Polygon", "coordinates": poly})
+            for poly in coords
+        )
+
+    return float("inf")

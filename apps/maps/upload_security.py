@@ -16,6 +16,7 @@ ALLOWED_UPLOAD_EXTENSIONS = frozenset(
         ".shp",
         ".geojson",
         ".json",
+        ".csv",
     }
 )
 
@@ -51,7 +52,7 @@ def validate_upload_filename(filename: str) -> None:
     ext = Path(name).suffix.lower()
     if ext not in ALLOWED_UPLOAD_EXTENSIONS:
         raise UploadValidationError(
-            "Unsupported file type. Upload a .zip shapefile bundle, .geojson, or .json file."
+            "Unsupported file type. Upload a .zip shapefile bundle, .geojson, .json, or .csv file."
         )
 
 

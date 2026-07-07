@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 
 from django.db import transaction
 
-from .ai_service import _call_report_writing_provider, _model_label, _provider_chain, embed_texts
+from .ai_service import (
+    _call_chat_provider,
+    _model_label,
+    _provider_chain,
+    embed_texts,
+    friendly_provider_error,
+)
 from .context_extraction import extract_text_from_pages
 from .models import Report, ReportDocumentChunk
+
+logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 700
 CHUNK_OVERLAP = 100
@@ -65,6 +74,7 @@ def index_report_pdf(report_id: int) -> int:
 
     if not chunk_rows:
         ReportDocumentChunk.objects.filter(report=report).delete()
+        logger.warning("Report %s PDF produced no extractable text for chat indexing", report_id)
         return 0
 
     embeddings = embed_texts([row.text for row in chunk_rows])
@@ -75,7 +85,33 @@ def index_report_pdf(report_id: int) -> int:
         ReportDocumentChunk.objects.filter(report=report).delete()
         ReportDocumentChunk.objects.bulk_create(chunk_rows, batch_size=200)
 
+    logger.info("Indexed %s PDF chunks for report %s", len(chunk_rows), report_id)
     return len(chunk_rows)
+
+
+def ensure_report_indexed(report: Report) -> int:
+    """Build the PDF search index on demand (Celery indexing may not have run yet)."""
+    if not report.pdf_file:
+        return 0
+    existing = ReportDocumentChunk.objects.filter(report=report).count()
+    if existing:
+        return existing
+    return index_report_pdf(report.id)
+
+
+def _keyword_rank_chunks(chunks: list[ReportDocumentChunk], question: str, *, top_k: int) -> list[ReportDocumentChunk]:
+    terms = [term.lower() for term in re.findall(r"[a-z0-9]{3,}", question.lower())]
+    if not terms:
+        return chunks[:top_k]
+
+    def score(chunk: ReportDocumentChunk) -> int:
+        text = chunk.text.lower()
+        return sum(text.count(term) for term in terms)
+
+    ranked = sorted(chunks, key=score, reverse=True)
+    if score(ranked[0]) <= 0:
+        return sorted(chunks, key=lambda row: (row.page_number, row.chunk_index))[:top_k]
+    return ranked[:top_k]
 
 
 def retrieve_report_chunks(report: Report, question: str, *, top_k: int = 6) -> list[ReportDocumentChunk]:
@@ -89,14 +125,18 @@ def retrieve_report_chunks(report: Report, question: str, *, top_k: int = 6) -> 
         for chunk in chunks
     ]
     scored.sort(key=lambda row: row[0], reverse=True)
-    return [chunk for score, chunk in scored[:top_k] if score > 0]
+    selected = [chunk for score, chunk in scored[:top_k] if score > 0]
+    if not selected:
+        selected = _keyword_rank_chunks(chunks, question, top_k=top_k)
+    return selected[:top_k]
 
 
 REPORT_PDF_CHAT_PROMPT = (
-    "You are Terra Meta's report analyst. Answer using ONLY the provided PDF excerpts. "
-    "Cite page numbers in square brackets like [Page 3] when referencing content. "
-    "If the answer is not in the excerpts, say you cannot find it in the report. "
-    "Be concise and geological where appropriate."
+    "You are Terra Meta's report analyst. Answer ONLY from the PDF excerpts in Reference context. "
+    "Quote specific facts, names, numbers, and locations from the document. "
+    "Cite page numbers in square brackets like [Page 3] for every claim. "
+    "If the excerpts do not contain the answer, say: \"I cannot find that in this report.\" "
+    "Do not invent generic geology or use outside knowledge. Be concise."
 )
 
 
@@ -108,32 +148,46 @@ def answer_report_chat(
     excerpt_block = "\n\n".join(
         f"[Page {chunk.page_number}]\n{chunk.text}" for chunk in chunks
     )
-    user_content = f"PDF excerpts:\n{excerpt_block}\n\nUser question:\n{question.strip()}"
-    messages = []
+    if not excerpt_block.strip():
+        return (
+            "I cannot read text from this PDF yet. The document may be scanned, still indexing, "
+            "or empty — try again shortly or re-upload a text-based PDF.",
+            "fallback",
+        )
+
+    context = f"PDF excerpts:\n{excerpt_block}"
+    chat_messages: list[dict[str, str]] = []
     for item in history or []:
         role = item.get("role")
         content = (item.get("content") or "").strip()
         if role in ("user", "assistant") and content:
-            messages.append({"role": role, "content": content})
-    messages.append({"role": "user", "content": user_content})
+            chat_messages.append({"role": role, "content": content})
+    chat_messages.append({"role": "user", "content": question.strip()})
 
     errors: list[str] = []
-    for provider in _provider_chain():
+    chain = _provider_chain()
+    if not chain:
+        raise RuntimeError(
+            "No AI providers are available. Configure GROQ_API_KEY, GEMINI_API_KEY, or a running Ollama server."
+        )
+
+    logger.info("Report chat provider chain: %s", " -> ".join(chain))
+
+    for provider in chain:
         try:
-            reply = _call_report_writing_provider(
+            reply = _call_chat_provider(
                 provider,
-                user_content,
-                messages[:-1],
+                chat_messages,
+                context,
                 system_prompt=REPORT_PDF_CHAT_PROMPT,
             )
-            if isinstance(reply, dict):
-                text = reply.get("assistant_reply") or reply.get("executive_summary") or ""
-            else:
-                text = str(reply).strip()
+            text = str(reply).strip()
             if text:
                 return text, _model_label(provider)
+            errors.append(f"{provider}: empty response")
         except Exception as exc:
-            errors.append(str(exc))
+            logger.warning("Report chat provider %s failed: %s", provider, exc)
+            errors.append(friendly_provider_error(provider, exc))
 
     if chunks:
         first = chunks[0]

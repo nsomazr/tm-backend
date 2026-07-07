@@ -37,18 +37,29 @@ from .insights import (
     build_area_ai_context,
     build_platform_ai_context,
     build_search_ai_context,
+    catalog_mineral_coverage_context,
+    enrich_area_insight_context,
+    generate_basic_map_insight,
     generate_basic_search_insight,
     generate_unmapped_insight,
+    _insight_contradicts_mapped_data,
     mineral_coverage_context,
     mineral_search_insights,
+    parse_exploration_geometry,
     region_coverage_context,
     layer_coverage_context,
     admin_boundary_coverage_context,
 )
+from apps.reports.ai_service import generate_geological_map_insight
+from .basemap_metadata import is_terrain_visual_basemap
+from .similar_areas import find_similar_areas
+from .insight_export import _decode_map_snapshot, build_insight_export_for_user
+
 from .aerial import included_aerial_km2, user_can_access_aerial_analysis
 from .admin_stats import build_admin_platform_analytics
 from .coverage_stats import build_feature_coverage_stats, build_layer_inventory
 from .mineral_coverage import (
+    build_layers_boundary_coverage,
     build_mineral_boundary_coverage,
     build_mineral_catalog,
     mineral_catalog_stats,
@@ -59,9 +70,157 @@ from .mineral_exploration import (
     ensure_mineral_exploration_allowed,
     get_mineral_exploration_quota,
 )
-from .insight_export import build_insight_export_for_user
 
 REPORT_EXPORT_CREDITS = 5
+
+
+def _area_insight_param(request, key: str, default=None):
+    if request.method == "POST" and isinstance(getattr(request, "data", None), dict):
+        if key in request.data:
+            return request.data.get(key, default)
+    alt = key.replace("_", "-") if "_" in key else key
+    if request.method == "POST" and isinstance(getattr(request, "data", None), dict):
+        if alt in request.data:
+            return request.data.get(alt, default)
+    return request.query_params.get(key, request.query_params.get(alt, default))
+
+
+def _build_area_insights_response(request):
+    try:
+        lat = float(_area_insight_param(request, "lat", ""))
+        lng = float(_area_insight_param(request, "lng", ""))
+    except (TypeError, ValueError):
+        return Response({"detail": "lat and lng are required."}, status=400)
+
+    try:
+        zoom = int(_area_insight_param(request, "zoom", 8))
+    except (TypeError, ValueError):
+        zoom = 8
+
+    feature_ids: list[int] = []
+    raw_ids = _area_insight_param(request, "feature_ids", "")
+    if isinstance(raw_ids, list):
+        for part in raw_ids:
+            try:
+                feature_ids.append(int(part))
+            except (TypeError, ValueError):
+                continue
+    elif raw_ids:
+        for part in str(raw_ids).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                feature_ids.append(int(part))
+            except ValueError:
+                continue
+
+    user = request.user
+    has_detail = user_has_map_detail_access(user)
+    locale = get_request_locale(request)
+    access = user_can_access_aerial_analysis(user, lat, lng, zoom)
+    analysis_km2 = access.get("analysis_area_km2", included_aerial_km2())
+    country_code = _area_insight_param(request, "country", "TZ")
+    basemap = _area_insight_param(request, "basemap")
+    map_snapshot_raw = _area_insight_param(request, "map_snapshot")
+    boundary_id = None
+    raw_boundary = _area_insight_param(request, "boundary_id") or _area_insight_param(
+        request, "admin_boundary_id", ""
+    )
+    if raw_boundary:
+        try:
+            boundary_id = int(raw_boundary)
+        except ValueError:
+            pass
+    exploration_geometry = parse_exploration_geometry(
+        _area_insight_param(request, "exploration_geometry")
+    )
+    ctx = area_location_context(
+        lat,
+        lng,
+        zoom,
+        user,
+        locale=locale,
+        feature_ids=feature_ids or None,
+        analysis_area_km2=analysis_km2,
+        admin_boundary_id=boundary_id if not exploration_geometry else None,
+        exploration_geometry=exploration_geometry,
+        country_code=country_code,
+    )
+    enrich_area_insight_context(ctx, basemap=basemap, locale=locale)
+
+    image_b64 = None
+    if (
+        map_snapshot_raw
+        and isinstance(map_snapshot_raw, str)
+        and is_terrain_visual_basemap(basemap)
+    ):
+        snapshot_bytes = _decode_map_snapshot(map_snapshot_raw)
+        if snapshot_bytes:
+            import base64
+
+            image_b64 = base64.b64encode(snapshot_bytes).decode("ascii")
+
+    payload = {
+        **ctx,
+        "ai_insight": None,
+        "ai_model": None,
+        "insight_tier": "none",
+        "requires_subscription": False,
+        "has_detail_access": has_detail,
+        "assistant_credits": get_assistant_credit_quota(request, user),
+        "aerial": access,
+        "visual_observations": None,
+        "similar_areas": [],
+    }
+
+    if ctx.get("has_mapped_data"):
+        payload["similar_areas"] = find_similar_areas(ctx, user, locale=locale)
+
+    if not has_detail:
+        payload["requires_subscription"] = True
+        payload["upgrade_message"] = (
+            "Subscribe to unlock location Terra insights, analytics, and report downloads."
+        )
+        if not ctx["has_mapped_data"]:
+            payload["ai_insight"] = None
+        return Response(payload)
+
+    if ctx["has_mapped_data"]:
+        try:
+            consume_assistant_credit(
+                request,
+                kind=AssistantCreditUsage.Kind.MAP_INSIGHT,
+                user=user,
+            )
+        except InsufficientAssistantCredits as exc:
+            payload["assistant_credits"] = exc.quota
+            payload["requires_subscription"] = exc.quota.get("tier") in ("free", "anonymous")
+            payload["upgrade_message"] = "No Ask Terra credits remaining. Upgrade for more credits."
+            return Response(payload)
+
+        ai_context = build_area_ai_context(ctx)
+        insight, model = generate_geological_map_insight(ai_context, image_b64=image_b64)
+        if (
+            model == "fallback"
+            or len((insight or "").strip()) < 200
+            or _insight_contradicts_mapped_data(insight, ctx)
+        ):
+            insight = generate_basic_map_insight(ctx, locale=locale)
+            model = "template"
+        payload["ai_insight"] = insight
+        payload["ai_model"] = model
+        if image_b64 and model != "template":
+            payload["visual_observations"] = (
+                f"Visual interpretation from {ctx.get('basemap_label') or 'map'} view ({model})."
+            )
+        payload["insight_tier"] = "full" if has_detail else "highlight"
+        payload["assistant_credits"] = get_assistant_credit_quota(request, user)
+    else:
+        payload["ai_insight"] = generate_unmapped_insight(lat, lng, locale=locale)
+        payload["insight_tier"] = "none"
+
+    return Response(payload)
 
 
 class HotspotAnalyticsView(APIView):
@@ -184,6 +343,29 @@ class MineralBoundaryCoverageView(PublicCatalogThrottleMixin, APIView):
         return Response(payload)
 
 
+class LayerBoundaryCoverageView(PublicCatalogThrottleMixin, APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        country_code = (request.query_params.get("country") or "TZ").upper()
+        include_villages = request.query_params.get("include_villages", "").lower() in ("1", "true", "yes")
+        raw_ids = (request.query_params.get("layer_ids") or "").strip()
+        layer_ids: list[int] = []
+        for part in raw_ids.split(","):
+            part = part.strip()
+            if part.isdigit():
+                layer_ids.append(int(part))
+        if not layer_ids:
+            return Response({"detail": "layer_ids is required."}, status=400)
+        payload = build_layers_boundary_coverage(
+            layer_ids,
+            country_code=country_code,
+            user=request.user,
+            include_villages=include_villages,
+        )
+        return Response(payload)
+
+
 class MineralHeatmapView(PublicCatalogThrottleMixin, APIView):
     permission_classes = [AllowAny]
 
@@ -206,7 +388,7 @@ class MineralHeatmapView(PublicCatalogThrottleMixin, APIView):
         country_code = (request.query_params.get("country") or "TZ").upper()
         locale = get_request_locale(request)
         raw_layer_ids = (request.query_params.get("layer_ids") or "").strip()
-        layer_ids = None
+        layer_ids: list[int] | None = None
         if raw_layer_ids:
             layer_ids = []
             for part in raw_layer_ids.split(","):
@@ -215,11 +397,6 @@ class MineralHeatmapView(PublicCatalogThrottleMixin, APIView):
                     layer_ids.append(int(part))
             if not layer_ids:
                 layer_ids = None
-        if not layer_ids:
-            return Response(
-                {"detail": "Select one or more map layers to build a mineral heatmap."},
-                status=400,
-            )
         payload = build_mineral_heatmap(
             slug,
             country_code=country_code,
@@ -263,16 +440,7 @@ class SearchContextInsightsView(PublicCatalogThrottleMixin, APIView):
 
         ctx = None
         if mineral_slug:
-            from apps.maps.models import MapLayer
-
-            from .mineral_coverage import _find_layer_for_catalog_slug
-
-            layers = list(MapLayer.objects.filter(is_active=True).select_related("mineral", "mineral__country"))
-            layer = _find_layer_for_catalog_slug(mineral_slug, layers)
-            if layer:
-                ctx = layer_coverage_context(layer.id, user, locale=locale)
-            else:
-                ctx = mineral_coverage_context(mineral_slug, user, locale=locale)
+            ctx = catalog_mineral_coverage_context(mineral_slug, user, locale=locale)
         elif boundary_raw:
             try:
                 ctx = admin_boundary_coverage_context(int(boundary_raw), user, locale=locale)
@@ -347,100 +515,10 @@ class AreaInsightsView(PublicCatalogThrottleMixin, APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        try:
-            lat = float(request.query_params.get("lat", ""))
-            lng = float(request.query_params.get("lng", ""))
-        except (TypeError, ValueError):
-            return Response({"detail": "lat and lng are required."}, status=400)
+        return _build_area_insights_response(request)
 
-        try:
-            zoom = int(request.query_params.get("zoom", 8))
-        except (TypeError, ValueError):
-            zoom = 8
-
-        feature_ids: list[int] = []
-        raw_ids = request.query_params.get("feature_ids", "")
-        if raw_ids:
-            for part in raw_ids.split(","):
-                part = part.strip()
-                if not part:
-                    continue
-                try:
-                    feature_ids.append(int(part))
-                except ValueError:
-                    continue
-
-        user = request.user
-        has_detail = user_has_map_detail_access(user)
-        locale = get_request_locale(request)
-        access = user_can_access_aerial_analysis(user, lat, lng, zoom)
-        analysis_km2 = access.get("analysis_area_km2", included_aerial_km2())
-        country_code = request.query_params.get("country", "TZ")
-        boundary_id = None
-        raw_boundary = request.query_params.get("boundary_id") or request.query_params.get(
-            "admin_boundary_id", ""
-        )
-        if raw_boundary:
-            try:
-                boundary_id = int(raw_boundary)
-            except ValueError:
-                pass
-        ctx = area_location_context(
-            lat,
-            lng,
-            zoom,
-            user,
-            locale=locale,
-            feature_ids=feature_ids or None,
-            analysis_area_km2=analysis_km2,
-            admin_boundary_id=boundary_id,
-            country_code=country_code,
-        )
-
-        payload = {
-            **ctx,
-            "ai_insight": None,
-            "ai_model": None,
-            "insight_tier": "none",
-            "requires_subscription": False,
-            "has_detail_access": has_detail,
-            "assistant_credits": get_assistant_credit_quota(request, user),
-            "aerial": access,
-        }
-
-        if not has_detail:
-            payload["requires_subscription"] = True
-            payload["upgrade_message"] = (
-                "Subscribe to unlock location Terra insights, analytics, and report downloads."
-            )
-            if not ctx["has_mapped_data"]:
-                payload["ai_insight"] = None
-            return Response(payload)
-
-        if ctx["has_mapped_data"]:
-            try:
-                consume_assistant_credit(
-                    request,
-                    kind=AssistantCreditUsage.Kind.MAP_INSIGHT,
-                    user=user,
-                )
-            except InsufficientAssistantCredits as exc:
-                payload["assistant_credits"] = exc.quota
-                payload["requires_subscription"] = exc.quota.get("tier") in ("free", "anonymous")
-                payload["upgrade_message"] = "No Ask Terra credits remaining. Upgrade for more credits."
-                return Response(payload)
-
-            ai_context = build_area_ai_context(ctx)
-            insight, model = generate_map_insight(ai_context)
-            payload["ai_insight"] = insight
-            payload["ai_model"] = model
-            payload["insight_tier"] = "full" if has_detail else "highlight"
-            payload["assistant_credits"] = get_assistant_credit_quota(request, user)
-        else:
-            payload["ai_insight"] = generate_unmapped_insight(lat, lng, locale=locale)
-            payload["insight_tier"] = "none"
-
-        return Response(payload)
+    def post(self, request):
+        return _build_area_insights_response(request)
 
 
 class AssistantCreditsView(PublicCatalogThrottleMixin, APIView):
@@ -599,6 +677,12 @@ class TerraAssistantChatView(PublicCatalogThrottleMixin, APIView):
                     except (TypeError, ValueError):
                         pass
                 country_code = (request.data.get("country") or "TZ").upper()
+                basemap = (request.data.get("basemap") or "").strip() or None
+                exploration_geometry = parse_exploration_geometry(
+                    request.data.get("exploration_geometry")
+                )
+                access = user_can_access_aerial_analysis(user, lat, lng, zoom)
+                analysis_km2 = access.get("analysis_area_km2", included_aerial_km2())
 
                 ctx = area_location_context(
                     lat,
@@ -607,9 +691,12 @@ class TerraAssistantChatView(PublicCatalogThrottleMixin, APIView):
                     user,
                     locale=locale,
                     feature_ids=feature_ids or None,
-                    admin_boundary_id=boundary_id,
+                    analysis_area_km2=analysis_km2,
+                    admin_boundary_id=boundary_id if not exploration_geometry else None,
+                    exploration_geometry=exploration_geometry,
                     country_code=country_code,
                 )
+                enrich_area_insight_context(ctx, basemap=basemap, locale=locale)
                 context = build_area_ai_context(ctx)
 
         if not context and not platform_only:
@@ -773,6 +860,20 @@ class TerraInsightExportView(APIView):
                 else:
                     boundary_id = val
 
+        exploration_geometry = parse_exploration_geometry(
+            request.data.get("exploration_geometry")
+        )
+        analysis_km2 = None
+        raw_km2 = request.data.get("analysis_area_km2")
+        if raw_km2 not in (None, ""):
+            try:
+                analysis_km2 = float(raw_km2)
+            except (TypeError, ValueError):
+                analysis_km2 = None
+        if analysis_km2 is None and mode == "map" and lat is not None and lng is not None:
+            access = user_can_access_aerial_analysis(user, lat, lng, zoom or 8)
+            analysis_km2 = access.get("analysis_area_km2")
+
         try:
             consume_assistant_credit(
                 request,
@@ -805,7 +906,9 @@ class TerraInsightExportView(APIView):
                 region_id=region_id,
                 layer_id=layer_id,
                 feature_ids=feature_ids or None,
-                boundary_id=boundary_id,
+                boundary_id=boundary_id if not exploration_geometry else None,
+                exploration_geometry=exploration_geometry,
+                analysis_area_km2=analysis_km2,
             )
         except PermissionError as exc:
             return Response({"detail": str(exc)}, status=403)
@@ -893,3 +996,47 @@ class AdminMineralAnalyticsView(APIView):
                 {"detail": "Could not build mineral analytics. Check server logs for details."},
                 status=500,
             )
+
+
+class AssistantPlatformSettingsView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        from .ai_settings import assistant_settings_payload
+
+        return Response(assistant_settings_payload())
+
+    def patch(self, request):
+        from apps.compliance.views import log_audit
+
+        from .ai_settings import assistant_settings_payload, update_assistant_settings
+
+        ai_provider = request.data.get("ai_provider")
+        ai_provider_fallback = request.data.get("ai_provider_fallback")
+        if not isinstance(ai_provider, str) or not ai_provider.strip():
+            return Response({"ai_provider": ["Primary provider is required."]}, status=400)
+        if not isinstance(ai_provider_fallback, list):
+            return Response(
+                {"ai_provider_fallback": ["Expected a list of fallback providers."]},
+                status=400,
+            )
+
+        try:
+            payload = update_assistant_settings(
+                ai_provider=ai_provider,
+                ai_provider_fallback=ai_provider_fallback,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+
+        log_audit(
+            request,
+            "assistant_settings_update",
+            "AssistantPlatformSettings",
+            1,
+            {
+                "ai_provider": payload["ai_provider"],
+                "ai_provider_fallback": payload["ai_provider_fallback"],
+            },
+        )
+        return Response(payload)

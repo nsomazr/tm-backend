@@ -75,8 +75,8 @@ def email_layout_html(*, title: str, heading: str, body_html: str) -> str:
             <td style="padding:20px 32px 28px;background:#f8fafc;border-top:1px solid #e2e8f0;text-align:center;">
               <p style="margin:0;font-size:12px;color:#64748b;line-height:1.6;">
                 <strong style="color:#1e3a2f;">Terra Meta</strong> by
-                <a href="https://5ggeology.com" style="color:#2d5a47;text-decoration:none;font-weight:600;">5G Geology</a><br />
-                Mineral intelligence platform
+                <a href="https://5ggeology.com" style="color:#2d5a47;text-decoration:none;font-weight:600;">5G Geology Futures</a><br />
+                Mineral intelligence
               </p>
             </td>
           </tr>

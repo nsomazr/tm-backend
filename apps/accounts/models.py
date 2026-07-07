@@ -91,3 +91,24 @@ class EmailOTP(models.Model):
 
     def __str__(self):
         return f"{self.email} ({self.purpose})"
+
+
+class PhoneOTP(models.Model):
+    class Purpose(models.TextChoices):
+        REGISTER = "register", "Register"
+        LOGIN = "login", "Login"
+
+    phone = models.CharField(max_length=20, db_index=True)
+    code = models.CharField(max_length=6)
+    purpose = models.CharField(max_length=20, choices=Purpose.choices)
+    used = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["phone", "purpose", "used"]),
+        ]
+
+    def __str__(self):
+        return f"{self.phone} ({self.purpose})"

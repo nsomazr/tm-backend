@@ -1,3 +1,6 @@
+import logging
+
+from django.conf import settings
 from django.http import FileResponse, Http404
 from rest_framework import generics, status, viewsets
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -5,7 +8,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.permissions import IsMineralManagerOrAdmin
-from apps.analytics.credits import InsufficientAssistantCredits, consume_assistant_credit
+from apps.analytics.credits import InsufficientAssistantCredits, consume_assistant_credit, get_assistant_credit_quota
 from apps.minerals.permissions import get_managed_mineral_ids, user_can_manage_mineral
 
 from .access import get_subscription_download_quota, record_subscription_download, user_can_download_report, user_has_report_detail_access
@@ -18,7 +21,7 @@ from .exploration_pdf_service import save_exploration_report_pdf
 from .exploration_service import generate_exploration_draft
 from .models import Report, ReportChatThread, UserExplorationReport
 from .pdf_service import ensure_report_pdf
-from .rag_service import answer_report_chat, retrieve_report_chunks
+from .rag_service import answer_report_chat, ensure_report_indexed, retrieve_report_chunks
 from .serializers import (
     ReportAdminSerializer,
     ReportChatSerializer,
@@ -27,7 +30,10 @@ from .serializers import (
     UserExplorationRefineSerializer,
     UserExplorationReportSerializer,
 )
+from .web_search import append_web_references, search_web_for_report, web_search_unavailable_reason
 from .tasks import generate_report_summary, index_report_pdf
+
+logger = logging.getLogger(__name__)
 
 
 def _admin_report_queryset(user):
@@ -49,8 +55,18 @@ def _post_save_report(report, *, manual_summary: bool, pdf_changed: bool, regene
         sync_report_article_body(report, force=True)
         return
     if pdf_changed:
-        generate_report_summary.delay(report.id)
-        index_report_pdf.delay(report.id)
+        # Uploaded PDFs are the report — index for chat/search only, do not rewrite as AI text.
+        if report.source_type == Report.SourceType.UPLOADED:
+            from .rag_service import index_report_pdf
+
+            try:
+                index_report_pdf(report.id)
+            except Exception:
+                logger.exception("Synchronous PDF indexing failed for report %s", report.id)
+                index_report_pdf.delay(report.id)
+        else:
+            generate_report_summary.delay(report.id)
+            index_report_pdf.delay(report.id)
     elif regenerate_pdf:
         ensure_report_pdf(report, force=True)
         sync_report_article_body(report, force=True)
@@ -222,11 +238,36 @@ class ReportAdminAiAssistView(APIView):
         if context_file:
             extracted = extract_text_from_upload(context_file)
             if extracted:
-                context_text = f"{context_text}\n\n{extracted}".strip() if context_text else extracted
+                uploaded = f"Uploaded reference document ({context_file.name}):\n{extracted}"
+                context_text = f"{context_text}\n\n{uploaded}".strip() if context_text else uploaded
+
+        instruction = (serializer.validated_data.get("instruction") or "").strip()
+        metadata = serializer.validated_metadata()
+        web_search_requested = serializer.validated_enable_web_search()
+        web_sources = []
+        web_search_warning = None
+
+        if web_search_requested:
+            unavailable = web_search_unavailable_reason()
+            if unavailable:
+                web_search_warning = unavailable
+            else:
+                web_result = search_web_for_report(metadata, instruction)
+                web_sources = web_result.sources
+                if web_result.context_text:
+                    context_text = (
+                        f"{context_text}\n\n{web_result.context_text}".strip()
+                        if context_text
+                        else web_result.context_text
+                    )
+                elif not web_sources:
+                    web_search_warning = (
+                        "Web search returned no results. Try a more specific prompt or check your Tavily account."
+                    )
 
         try:
             draft, model_used = generate_report_writing_assist(
-                metadata=serializer.validated_metadata(),
+                metadata=metadata,
                 context_text=context_text,
                 messages=serializer.validated_chat_messages(),
                 current_draft=serializer.validated_current_draft(),
@@ -237,12 +278,31 @@ class ReportAdminAiAssistView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
+        if web_sources and draft.get("executive_summary"):
+            draft["executive_summary"] = append_web_references(
+                draft["executive_summary"],
+                web_sources,
+            )
+
+        if draft.get("key_findings"):
+            from .report_text_utils import filter_report_findings
+
+            draft["key_findings"] = filter_report_findings(
+                [str(item).strip() for item in draft["key_findings"] if str(item).strip()]
+            )
+
         return Response(
             {
                 "executive_summary": draft.get("executive_summary") or "",
                 "key_findings": draft.get("key_findings") or [],
                 "assistant_reply": draft.get("assistant_reply") or "",
                 "model_used": model_used,
+                "web_search": {
+                    "requested": web_search_requested,
+                    "used": bool(web_sources),
+                    "source_count": len(web_sources),
+                    "warning": web_search_warning,
+                },
             }
         )
 
@@ -281,6 +341,25 @@ class ReportChatView(APIView):
         serializer.is_valid(raise_exception=True)
         message = serializer.validated_data["message"].strip()
 
+        quota = get_assistant_credit_quota(request, user=request.user)
+        if not quota.get("unlimited") and (quota.get("remaining") or 0) < 1:
+            return Response(
+                {"detail": "Insufficient assistant credits.", "assistant_credits": quota},
+                status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
+
+        thread, _ = ReportChatThread.objects.get_or_create(report=report, user=request.user)
+        history = list(thread.messages or [])
+        ensure_report_indexed(report)
+        chunks = retrieve_report_chunks(report, message)
+        try:
+            reply, model_used = answer_report_chat(message, chunks, history)
+        except Exception as exc:
+            return Response(
+                {"detail": str(exc) or "Report chat unavailable right now."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
         try:
             from apps.analytics.models import AssistantCreditUsage
             consume_assistant_credit(
@@ -294,14 +373,6 @@ class ReportChatView(APIView):
                 {"detail": "Insufficient assistant credits.", "assistant_credits": exc.quota},
                 status=status.HTTP_402_PAYMENT_REQUIRED,
             )
-
-        thread, _ = ReportChatThread.objects.get_or_create(report=report, user=request.user)
-        history = list(thread.messages or [])
-        chunks = retrieve_report_chunks(report, message)
-        try:
-            reply, model_used = answer_report_chat(message, chunks, history)
-        except Exception as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
 
         history.append({"role": "user", "content": message})
         history.append({"role": "assistant", "content": reply, "model_used": model_used})

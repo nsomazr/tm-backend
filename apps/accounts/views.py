@@ -6,8 +6,17 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
+from .beem_sms import BeemSmsError
 from .models import EmailOTP, User
-from .otp_service import get_or_create_password_user, send_email_otp, verify_email_otp
+from .otp_service import (
+    get_or_create_password_user,
+    send_email_otp,
+    send_phone_otp,
+    verify_email_otp,
+    verify_phone_otp,
+    OTP_SMS_TTL_MINUTES,
+    OTP_TTL_MINUTES,
+)
 from .permissions import IsAdminUser, IsSuperAdmin
 from .throttling import AuthAnonThrottle, OTPSendThrottle, OTPVerifyThrottle
 from .serializers import (
@@ -65,18 +74,37 @@ class SendOTPView(APIView):
     def post(self, request):
         serializer = SendOTPSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        email = serializer.validated_data["email"]
-        purpose = serializer.validated_data["purpose"]
+        data = serializer.validated_data
+        purpose = data["purpose"]
+        channel = data["channel"]
         try:
-            send_email_otp(email, purpose)
+            if channel == "sms":
+                send_phone_otp(data["phone"], purpose)
+            else:
+                send_email_otp(data["email"], purpose)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        except BeemSmsError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         except Exception:
-            return Response(
-                {"detail": "Could not send verification email. Please try password sign-up or try again later."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail = (
+                "Could not send verification SMS. Please try again later."
+                if channel == "sms"
+                else "Could not send verification email. Please try password sign-up or try again later."
             )
-        return Response({"detail": "Verification code sent.", "email": email})
+            return Response({"detail": detail}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        ttl_minutes = OTP_SMS_TTL_MINUTES if channel == "sms" else OTP_TTL_MINUTES
+        payload = {
+            "detail": "Verification code sent.",
+            "channel": channel,
+            "expires_in": ttl_minutes * 60,
+        }
+        if channel == "sms":
+            payload["phone"] = data["phone"]
+        else:
+            payload["email"] = data["email"]
+        return Response(payload)
 
 
 class VerifyOTPView(APIView):
@@ -86,15 +114,17 @@ class VerifyOTPView(APIView):
     def post(self, request):
         serializer = VerifyOTPSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        email = serializer.validated_data["email"]
-        code = serializer.validated_data["code"]
-        purpose = serializer.validated_data["purpose"]
+        data = serializer.validated_data
+        code = data["code"]
+        purpose = data["purpose"]
+        otp_purpose = (
+            EmailOTP.Purpose.REGISTER if purpose == "register" else EmailOTP.Purpose.LOGIN
+        )
         try:
-            user, _created = verify_email_otp(
-                email,
-                code,
-                EmailOTP.Purpose.REGISTER if purpose == "register" else EmailOTP.Purpose.LOGIN,
-            )
+            if data["channel"] == "sms":
+                user, _created = verify_phone_otp(data["phone"], code, otp_purpose)
+            else:
+                user, _created = verify_email_otp(data["email"], code, otp_purpose)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(_tokens_for_user(user))
