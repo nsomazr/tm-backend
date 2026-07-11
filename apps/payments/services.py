@@ -2,15 +2,12 @@ import logging
 import re
 import uuid
 from datetime import date, timedelta
-from io import BytesIO
 
 from celery import shared_task
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.mail import EmailMultiAlternatives
 from django.utils import timezone
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
 
 from apps.accounts.models import User
 from apps.analytics.models import AerialAnalysisGrant
@@ -18,6 +15,7 @@ from apps.compliance.models import LicenseAgreement
 from apps.subscriptions.models import DownloadPurchase, UserSubscription
 
 from .models import DocumentEmailLog, Invoice, PaymentOrder, Receipt
+from .payment_pdf import build_payment_document_pdf
 from .snippe import (
     SnippeClient,
     SnippeError,
@@ -57,24 +55,20 @@ def _order_description(order):
     return order_description(order)
 
 
-def _render_payment_pdf(*, title: str, document_number: str, order: PaymentOrder, description: str) -> bytes:
-    buffer = BytesIO()
-    p = canvas.Canvas(buffer, pagesize=letter)
-    p.setFont("Helvetica-Bold", 16)
-    p.drawString(72, 750, title)
-    p.setFont("Helvetica", 12)
-    p.drawString(72, 720, f"Number: {document_number}")
-    p.drawString(72, 700, f"Date: {timezone.now().strftime('%Y-%m-%d')}")
-    p.drawString(72, 680, f"Customer: {order.user.get_full_name() or order.user.username}")
-    p.drawString(72, 660, f"Email: {order.user.email}")
-    p.drawString(72, 640, f"Order ref: {order.merchant_reference}")
-    p.drawString(72, 610, f"Description: {description}")
-    p.drawString(72, 590, f"Amount: {order.amount} {order.currency}")
-    p.drawString(72, 570, f"Payment status: {order.status}")
-    p.drawString(72, 550, f"Provider: {order.payment_provider}")
-    p.showPage()
-    p.save()
-    return buffer.getvalue()
+def _render_payment_pdf(
+    *,
+    kind: str,
+    document_number: str,
+    order: PaymentOrder,
+    description: str,
+) -> bytes:
+    return build_payment_document_pdf(
+        kind="receipt" if kind == "receipt" else "invoice",
+        document_number=document_number,
+        order=order,
+        description=description,
+        issued_date=timezone.now().strftime("%d %B %Y"),
+    )
 
 
 def ensure_invoice(order: PaymentOrder, *, regenerate: bool = False) -> Invoice:
@@ -83,7 +77,7 @@ def ensure_invoice(order: PaymentOrder, *, regenerate: bool = False) -> Invoice:
     if existing and not regenerate:
         if not existing.pdf_file:
             pdf = _render_payment_pdf(
-                title="Terra Meta Invoice",
+                kind="invoice",
                 document_number=existing.invoice_number,
                 order=order,
                 description=existing.description or order_description(order),
@@ -111,7 +105,7 @@ def ensure_invoice(order: PaymentOrder, *, regenerate: bool = False) -> Invoice:
         )
 
     pdf = _render_payment_pdf(
-        title="Terra Meta Invoice",
+        kind="invoice",
         document_number=invoice_number,
         order=order,
         description=description,
@@ -129,7 +123,7 @@ def ensure_receipt(order: PaymentOrder, *, regenerate: bool = False) -> Receipt:
     if existing and not regenerate:
         if not existing.pdf_file:
             pdf = _render_payment_pdf(
-                title="Terra Meta Receipt",
+                kind="receipt",
                 document_number=existing.receipt_number,
                 order=order,
                 description=existing.description or order_description(order),
@@ -157,7 +151,7 @@ def ensure_receipt(order: PaymentOrder, *, regenerate: bool = False) -> Receipt:
         )
 
     pdf = _render_payment_pdf(
-        title="Terra Meta Receipt",
+        kind="receipt",
         document_number=receipt_number,
         order=order,
         description=description,
@@ -221,15 +215,22 @@ def email_payment_document(
         f"— Terra Meta billing\n"
     )
     html_body = (
+        "<div style=\"font-family:Helvetica,Arial,sans-serif;color:#334155;line-height:1.5;\">"
+        "<p style=\"color:#166534;font-weight:bold;margin:0 0 8px;\">Terra Meta</p>"
         f"<p>Hello,</p>"
         f"<p>Please find attached your Terra Meta <strong>{label}</strong> "
-        f"(<code>{document_number}</code>).</p>"
-        f"<ul>"
-        f"<li>Order: <code>{order.merchant_reference}</code></li>"
-        f"<li>Amount: <strong>{order.amount} {order.currency}</strong></li>"
-        f"<li>Description: {description}</li>"
-        f"</ul>"
-        f"<p>— Terra Meta billing</p>"
+        f"(<code style=\"background:#f1f5f9;padding:2px 6px;border-radius:4px;\">{document_number}</code>).</p>"
+        "<table style=\"border-collapse:collapse;width:100%;max-width:480px;margin:16px 0;"
+        "border:1px solid #e2e8f0;\">"
+        f"<tr><td style=\"padding:10px 12px;background:#f8fafc;color:#64748b;font-size:12px;\">Order</td>"
+        f"<td style=\"padding:10px 12px;\"><code>{order.merchant_reference}</code></td></tr>"
+        f"<tr><td style=\"padding:10px 12px;background:#f8fafc;color:#64748b;font-size:12px;\">Amount</td>"
+        f"<td style=\"padding:10px 12px;font-weight:bold;color:#166534;\">{order.amount} {order.currency}</td></tr>"
+        f"<tr><td style=\"padding:10px 12px;background:#f8fafc;color:#64748b;font-size:12px;\">Description</td>"
+        f"<td style=\"padding:10px 12px;\">{description}</td></tr>"
+        "</table>"
+        "<p style=\"color:#64748b;font-size:13px;\">— Terra Meta · 5G Geology Futures</p>"
+        "</div>"
     )
 
     log = DocumentEmailLog(
