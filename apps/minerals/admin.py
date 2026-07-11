@@ -14,6 +14,7 @@ class MineralAdmin(admin.ModelAdmin):
     list_display = ("name", "slug", "category", "country", "is_active")
     list_filter = ("country", "category", "is_active")
     prepopulated_fields = {"slug": ("name",)}
+    filter_horizontal = ("associated_layers",)
 
 
 @admin.register(MineralManagerAssignment)

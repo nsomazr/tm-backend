@@ -16,6 +16,7 @@ from apps.maps.geometry_utils import (
 )
 from apps.maps.layer_defaults import GENERAL_MINERAL_SLUG
 from apps.maps.models import MapFeature, MapLayer
+from apps.maps.models import HEATMAP_WEIGHT_DEFAULT, HEATMAP_WEIGHT_MAX
 
 from .insights import _accessible_features
 from .spatial_assign import feature_sample_point, layer_display_color
@@ -57,17 +58,13 @@ def _pair_weights(mineral_slug: str) -> dict[str, float]:
 
 
 def _layers_for_heatmap(layer_ids: list[int]) -> list[MapLayer]:
+    """Resolve active layers for an explicit id list (owned + associated allowed)."""
     if not layer_ids:
         return []
     id_set = set(layer_ids)
     matched = list(
         MapLayer.objects.filter(is_active=True, id__in=id_set).select_related("mineral")
     )
-    if not matched:
-        return []
-    mineral_slugs = {layer.mineral.slug for layer in matched}
-    if len(mineral_slugs) != 1:
-        return []
     return matched
 
 
@@ -86,6 +83,15 @@ def _layers_for_mineral_slug(mineral_slug: str, country_code: str = "TZ") -> lis
     )
 
 
+def _layer_heatmap_weight(layer: MapLayer) -> int:
+    raw = getattr(layer, "heatmap_weight", HEATMAP_WEIGHT_DEFAULT)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = HEATMAP_WEIGHT_DEFAULT
+    return max(0, min(HEATMAP_WEIGHT_MAX, value))
+
+
 def _heatmap_display_color(layers: list[MapLayer]) -> str:
     for layer_type in ("polygon", "point", "line"):
         for layer in layers:
@@ -97,37 +103,42 @@ def _heatmap_display_color(layers: list[MapLayer]) -> str:
 def _feature_buckets(
     layers: list[MapLayer],
     user,
-) -> tuple[list[dict[str, Any]], list[tuple[float, float]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     polygons: list[dict[str, Any]] = []
-    points: list[tuple[float, float]] = []
+    points: list[dict[str, Any]] = []
     lines: list[dict[str, Any]] = []
 
     for layer in layers:
+        weight = _layer_heatmap_weight(layer)
         qs = _accessible_features(user).filter(layer=layer).iterator(chunk_size=256)
         for feature in qs:
             geometry = feature.geometry
             if not geometry or "type" not in geometry:
                 lat, lng = feature_sample_point(feature)
                 if lat or lng:
-                    points.append((lat, lng))
+                    points.append({"lat": lat, "lng": lng, "weight": weight})
                 continue
 
             gtype = geometry["type"]
             if layer.layer_type == "polygon" or gtype in ("Polygon", "MultiPolygon"):
                 bbox = geometry_bbox(geometry)
                 if bbox:
-                    polygons.append({"geometry": geometry, "bbox": bbox})
+                    polygons.append({"geometry": geometry, "bbox": bbox, "weight": weight})
             elif layer.layer_type == "point" or gtype in ("Point", "MultiPoint"):
                 coords = geometry.get("coordinates") or []
                 if gtype == "Point":
-                    points.append((float(coords[1]), float(coords[0])))
+                    points.append(
+                        {"lat": float(coords[1]), "lng": float(coords[0]), "weight": weight}
+                    )
                 elif gtype == "MultiPoint":
                     for c in coords:
-                        points.append((float(c[1]), float(c[0])))
+                        points.append(
+                            {"lat": float(c[1]), "lng": float(c[0]), "weight": weight}
+                        )
             elif layer.layer_type == "line" or gtype in ("LineString", "MultiLineString"):
                 bbox = geometry_bbox(geometry)
                 if bbox:
-                    lines.append({"geometry": geometry, "bbox": bbox})
+                    lines.append({"geometry": geometry, "bbox": bbox, "weight": weight})
 
     return polygons, points, lines
 
@@ -145,7 +156,7 @@ def _bbox_pad(
 
 def _combined_bbox(
     polygons: list[dict[str, Any]],
-    points: list[tuple[float, float]],
+    points: list[dict[str, Any]],
     lines: list[dict[str, Any]],
 ) -> tuple[float, float, float, float] | None:
     min_lat = min_lng = float("inf")
@@ -156,11 +167,11 @@ def _combined_bbox(
         max_lat = max(max_lat, b[1])
         min_lng = min(min_lng, b[2])
         max_lng = max(max_lng, b[3])
-    for lat, lng in points:
-        min_lat = min(min_lat, lat)
-        max_lat = max(max_lat, lat)
-        min_lng = min(min_lng, lng)
-        max_lng = max(max_lng, lng)
+    for item in points:
+        min_lat = min(min_lat, item["lat"])
+        max_lat = max(max_lat, item["lat"])
+        min_lng = min(min_lng, item["lng"])
+        max_lng = max(max_lng, item["lng"])
     if min_lat == float("inf"):
         return None
     return _bbox_pad((min_lat, max_lat, min_lng, max_lng), 2.5)
@@ -208,6 +219,29 @@ def _intersection_weight(
     return 0.0
 
 
+def _scaled_intersection_weight(
+    poly_w: float | None,
+    point_w: float | None,
+    line_w: float | None,
+    *,
+    mineral_slug: str,
+) -> float:
+    """Class strength (3/2/1) scaled by mean heatmap_weight of contributing layers / 10."""
+    class_weight = _intersection_weight(
+        poly_w is not None,
+        point_w is not None,
+        line_w is not None,
+        mineral_slug=mineral_slug,
+    )
+    if class_weight <= 0:
+        return 0.0
+    contributing = [w for w in (poly_w, point_w, line_w) if w is not None]
+    if not contributing:
+        return 0.0
+    mean_weight = sum(contributing) / len(contributing)
+    return class_weight * (mean_weight / float(HEATMAP_WEIGHT_MAX))
+
+
 def _row_col_range_for_bbox(
     min_lat: float,
     max_lat: float,
@@ -243,10 +277,21 @@ def _expand_bbox_km(
     return min_lat - pad_lat, max_lat + pad_lat, min_lng - pad_lng, max_lng + pad_lng
 
 
+def _max_cell_weight(
+    grid: list[list[float | None]],
+    i: int,
+    j: int,
+    weight: float,
+) -> None:
+    current = grid[i][j]
+    if current is None or weight > current:
+        grid[i][j] = weight
+
+
 def _build_analysis_grid(
     bbox: tuple[float, float, float, float],
     polygons: list[dict[str, Any]],
-    points: list[tuple[float, float]],
+    points: list[dict[str, Any]],
     lines: list[dict[str, Any]],
     mineral_slug: str,
 ) -> tuple[list[list[float]], list[float], list[float]]:
@@ -261,55 +306,59 @@ def _build_analysis_grid(
     lngs = [min_lng + (max_lng - min_lng) * j / (n_cols - 1) for j in range(n_cols)]
     lats = [min_lat + (max_lat - min_lat) * i / (n_rows - 1) for i in range(n_rows)]
 
-    poly_hit = [[False] * n_cols for _ in range(n_rows)]
-    point_hit = [[False] * n_cols for _ in range(n_rows)]
-    line_hit = [[False] * n_cols for _ in range(n_rows)]
+    poly_w: list[list[float | None]] = [[None] * n_cols for _ in range(n_rows)]
+    point_w: list[list[float | None]] = [[None] * n_cols for _ in range(n_rows)]
+    line_w: list[list[float | None]] = [[None] * n_cols for _ in range(n_rows)]
 
     for item in polygons:
         expanded = _expand_bbox_km(item["bbox"], POLYGON_EDGE_KM + spacing_km)
         i0, i1, j0, j1 = _row_col_range_for_bbox(*expanded, lats, lngs)
         if i1 < i0:
             continue
+        weight = float(item.get("weight", HEATMAP_WEIGHT_DEFAULT))
         for i in range(i0, i1 + 1):
             lat = lats[i]
             for j in range(j0, j1 + 1):
                 lng = lngs[j]
                 if _near_polygon(lat, lng, item):
-                    poly_hit[i][j] = True
+                    _max_cell_weight(poly_w, i, j, weight)
 
-    for plat, plng in points:
+    for item in points:
+        plat, plng = item["lat"], item["lng"]
         expanded = _expand_bbox_km((plat, plat, plng, plng), POINT_PROX_KM + spacing_km)
         i0, i1, j0, j1 = _row_col_range_for_bbox(*expanded, lats, lngs)
         if i1 < i0:
             continue
+        weight = float(item.get("weight", HEATMAP_WEIGHT_DEFAULT))
         for i in range(i0, i1 + 1):
             lat = lats[i]
             for j in range(j0, j1 + 1):
                 lng = lngs[j]
                 if _near_point(lat, lng, plat, plng):
-                    point_hit[i][j] = True
+                    _max_cell_weight(point_w, i, j, weight)
 
     for item in lines:
         expanded = _expand_bbox_km(item["bbox"], LINE_PROX_KM + spacing_km)
         i0, i1, j0, j1 = _row_col_range_for_bbox(*expanded, lats, lngs)
         if i1 < i0:
             continue
+        weight = float(item.get("weight", HEATMAP_WEIGHT_DEFAULT))
         for i in range(i0, i1 + 1):
             lat = lats[i]
             for j in range(j0, j1 + 1):
                 lng = lngs[j]
                 if _near_line(lat, lng, item):
-                    line_hit[i][j] = True
+                    _max_cell_weight(line_w, i, j, weight)
 
     grid: list[list[float]] = []
     for i in range(n_rows):
         row: list[float] = []
         for j in range(n_cols):
             row.append(
-                _intersection_weight(
-                    poly_hit[i][j],
-                    point_hit[i][j],
-                    line_hit[i][j],
+                _scaled_intersection_weight(
+                    poly_w[i][j],
+                    point_w[i][j],
+                    line_w[i][j],
                     mineral_slug=mineral_slug,
                 )
             )
@@ -322,7 +371,7 @@ def _grid_to_points(
     grid: list[list[float]],
     lats: list[float],
     lngs: list[float],
-    feature_points: list[tuple[float, float]] | None = None,
+    feature_points: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, float]]:
     points: list[dict[str, float]] = []
     seen: set[tuple[float, float]] = set()
@@ -342,16 +391,21 @@ def _grid_to_points(
             if len(points) >= MAX_HEATMAP_POINTS:
                 return points
 
-    for plat, plng in feature_points or []:
+    for item in feature_points or []:
+        plat, plng = item["lat"], item["lng"]
         key = (round(plat, 5), round(plng, 5))
         if key in seen:
             continue
         seen.add(key)
+        layer_w = float(item.get("weight", HEATMAP_WEIGHT_DEFAULT))
         points.append(
             {
                 "lat": round(plat, 6),
                 "lng": round(plng, 6),
-                "weight": round(BASE_WEIGHTS["point"], 3),
+                "weight": round(
+                    BASE_WEIGHTS["point"] * (layer_w / float(HEATMAP_WEIGHT_MAX)),
+                    3,
+                ),
             }
         )
         if len(points) >= MAX_HEATMAP_POINTS:
@@ -378,7 +432,7 @@ def _heatmap_cache_key(
             user_key = f"user:{user.pk}"
     else:
         user_key = "anon"
-    return f"mineral_heatmap:v7:{country_code}:{mineral_slug}:{ids}:{user_key}"
+    return f"mineral_heatmap:v8:{country_code}:{mineral_slug}:{ids}:{user_key}"
 
 
 def _marching_squares_segment(
@@ -625,13 +679,19 @@ def build_mineral_heatmap(
     if not mineral_layers:
         return None
 
-    only_mineral_slug = next(iter({layer.mineral.slug for layer in mineral_layers}))
-    if mineral_slug == GENERAL_MINERAL_SLUG and only_mineral_slug != GENERAL_MINERAL_SLUG:
+    owned_slugs = {layer.mineral.slug for layer in mineral_layers if layer.mineral_id}
+    bias_slug = mineral_slug if mineral_slug in owned_slugs else next(iter(owned_slugs), mineral_slug)
+    if mineral_slug == GENERAL_MINERAL_SLUG and bias_slug != GENERAL_MINERAL_SLUG:
         return None
 
     color = _heatmap_display_color(mineral_layers)
-    slug = mineral_layers[0].slug if only_mineral_slug == GENERAL_MINERAL_SLUG else only_mineral_slug
+    slug = mineral_layers[0].slug if bias_slug == GENERAL_MINERAL_SLUG else mineral_slug
     display_name = localized_name(mineral_layers[0], locale)
+    for layer in mineral_layers:
+        if layer.mineral_id and layer.mineral.slug == mineral_slug:
+            display_name = localized_name(layer.mineral, locale)
+            color = layer.mineral.color or color
+            break
 
     polygons, points, lines = _feature_buckets(mineral_layers, user)
     if not polygons and not points and not lines:
@@ -642,14 +702,14 @@ def build_mineral_heatmap(
         return None
 
     grid, lats, lngs = _build_analysis_grid(
-        bbox, polygons, points, lines, only_mineral_slug
+        bbox, polygons, points, lines, bias_slug
     )
     points_out = _grid_to_points(grid, lats, lngs, feature_points=points)
     if not points_out:
         return None
 
     concentration_stats, contours = _concentration_contours(grid, lats, lngs)
-    pairs = _pair_weights(only_mineral_slug)
+    pairs = _pair_weights(bias_slug)
 
     layer_types_present = {
         t for layer in mineral_layers for t in [layer.layer_type]

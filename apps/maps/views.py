@@ -139,6 +139,7 @@ class MapLayerViewSet(viewsets.ModelViewSet):
             if self._include_inactive_list():
                 managed = get_managed_mineral_ids(self.request.user)
                 qs = qs.select_related("created_by", "mineral", "region").prefetch_related(
+                    "associated_minerals",
                     Prefetch(
                         "versions",
                         queryset=LayerVersion.objects.select_related("uploaded_by").order_by(
@@ -158,6 +159,7 @@ class MapLayerViewSet(viewsets.ModelViewSet):
                 return qs.order_by("z_index", "name")
             qs = layers_with_mapped_data(qs)
             qs = filter_layers_for_user(qs, self.request.user)
+            qs = qs.prefetch_related("associated_minerals")
             if self.action == "list":
                 qs = _annotate_list_feature_count(qs)
             return qs.order_by("z_index", "name")

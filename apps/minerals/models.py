@@ -50,6 +50,15 @@ class Mineral(models.Model):
     icon = models.CharField(max_length=50, blank=True)
     description = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
+    associated_layers = models.ManyToManyField(
+        "maps.MapLayer",
+        blank=True,
+        related_name="associated_minerals",
+        help_text=(
+            "Extra map layers (structures, points, etc.) included when this "
+            "commodity is selected for heatmap / catalog overlay."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

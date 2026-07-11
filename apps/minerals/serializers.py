@@ -3,6 +3,7 @@ from rest_framework import serializers
 from apps.accounts.models import User
 from apps.accounts.serializers import UserSerializer
 from apps.maps.localization import get_request_locale, localized_name
+from apps.maps.models import MapLayer
 
 from .models import Mineral, MineralCategory, MineralManagerAssignment
 
@@ -16,6 +17,12 @@ class MineralCategorySerializer(serializers.ModelSerializer):
 class MineralSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source="category.name", read_only=True)
     country_code = serializers.CharField(source="country.code", read_only=True)
+    associated_layer_ids = serializers.PrimaryKeyRelatedField(
+        source="associated_layers",
+        many=True,
+        queryset=MapLayer.objects.filter(is_active=True),
+        required=False,
+    )
 
     class Meta:
         model = Mineral
@@ -33,6 +40,7 @@ class MineralSerializer(serializers.ModelSerializer):
             "icon",
             "description",
             "is_active",
+            "associated_layer_ids",
             "created_at",
             "updated_at",
         )

@@ -4,6 +4,9 @@ from django.db import models
 
 BUFFER_KM_MIN = 1
 BUFFER_KM_MAX = 50
+HEATMAP_WEIGHT_MIN = 0
+HEATMAP_WEIGHT_MAX = 10
+HEATMAP_WEIGHT_DEFAULT = 5
 
 
 class MapLayer(models.Model):
@@ -31,7 +34,7 @@ class MapLayer(models.Model):
     z_index = models.IntegerField(default=0)
     is_preview = models.BooleanField(
         default=False,
-        help_text="Visible to free-tier users",
+        help_text="Show this layer on the free (unpaid) map and legend.",
     )
     is_active = models.BooleanField(default=True)
     style = models.JSONField(
@@ -50,6 +53,18 @@ class MapLayer(models.Model):
         help_text=(
             "Optional reference buffer (km) around each feature. "
             "Used when inferring map insights so nearby influencing factors are included."
+        ),
+    )
+    heatmap_weight = models.PositiveSmallIntegerField(
+        default=HEATMAP_WEIGHT_DEFAULT,
+        validators=[
+            MinValueValidator(HEATMAP_WEIGHT_MIN),
+            MaxValueValidator(HEATMAP_WEIGHT_MAX),
+        ],
+        help_text=(
+            "Relative strength (0–10) when this layer contributes to a mineral heatmap. "
+            "Intersection class (3/2/1 geometries) is scaled by the mean weight of "
+            "contributing layers."
         ),
     )
     current_version = models.PositiveIntegerField(default=1)

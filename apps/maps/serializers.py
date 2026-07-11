@@ -10,6 +10,8 @@ from apps.minerals.color_utils import enrich_layer_style
 from .models import (
     BUFFER_KM_MAX,
     BUFFER_KM_MIN,
+    HEATMAP_WEIGHT_MAX,
+    HEATMAP_WEIGHT_MIN,
     LayerUpload,
     LayerVersion,
     MapFeature,
@@ -137,6 +139,7 @@ class MapLayerSerializer(serializers.ModelSerializer):
     created_by_name = serializers.SerializerMethodField()
     last_uploaded_by_name = serializers.SerializerMethodField()
     last_uploaded_at = serializers.SerializerMethodField()
+    associated_catalog_slugs = serializers.SerializerMethodField()
     mineral = serializers.PrimaryKeyRelatedField(
         queryset=Mineral.objects.all(),
         required=False,
@@ -162,6 +165,8 @@ class MapLayerSerializer(serializers.ModelSerializer):
             "style",
             "description",
             "buffer_km",
+            "heatmap_weight",
+            "associated_catalog_slugs",
             "current_version",
             "feature_count",
             "created_by",
@@ -180,6 +185,7 @@ class MapLayerSerializer(serializers.ModelSerializer):
             "created_by_name",
             "last_uploaded_by_name",
             "last_uploaded_at",
+            "associated_catalog_slugs",
         )
 
     def get_feature_count(self, obj):
@@ -210,6 +216,15 @@ class MapLayerSerializer(serializers.ModelSerializer):
         version = self._latest_version(obj)
         return version.created_at if version else None
 
+    def get_associated_catalog_slugs(self, obj):
+        # Prefetch via associated_minerals when available.
+        minerals = getattr(obj, "associated_minerals", None)
+        if minerals is None:
+            return []
+        if hasattr(obj, "_prefetched_objects_cache") and "associated_minerals" in obj._prefetched_objects_cache:
+            return [m.slug for m in minerals.all()]
+        return list(minerals.filter(is_active=True).values_list("slug", flat=True))
+
     def validate_style(self, value):
         layer_type = (
             self.initial_data.get("layer_type")
@@ -226,6 +241,15 @@ class MapLayerSerializer(serializers.ModelSerializer):
         if value < BUFFER_KM_MIN or value > BUFFER_KM_MAX:
             raise serializers.ValidationError(
                 f"Buffer zone must be between {BUFFER_KM_MIN} and {BUFFER_KM_MAX} km."
+            )
+        return value
+
+    def validate_heatmap_weight(self, value):
+        if value is None:
+            return value
+        if value < HEATMAP_WEIGHT_MIN or value > HEATMAP_WEIGHT_MAX:
+            raise serializers.ValidationError(
+                f"Heatmap weight must be between {HEATMAP_WEIGHT_MIN} and {HEATMAP_WEIGHT_MAX}."
             )
         return value
 

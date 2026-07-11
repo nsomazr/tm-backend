@@ -758,6 +758,8 @@ def layer_coverage_context(layer_id: int, user, locale: str = "en") -> dict | No
 
     count = len(features)
     mineral = layer.mineral
+    description = (layer.description or "").strip() or f"Uploaded {layer.layer_type} layer"
+    attribute_samples = _feature_attribute_samples(features, max_features=10)
 
     ctx = {
         "lat": center["lat"] if center else -6.369,
@@ -774,13 +776,14 @@ def layer_coverage_context(layer_id: int, user, locale: str = "en") -> dict | No
             }
         ],
         "feature_count": count,
-        "labels": [],
+        "labels": [f.label for f in features if f.label][:8],
         "has_mapped_data": count > 0,
         "search_type": "layer",
         "search_name": localized_name(layer, locale),
-        "description": f"Uploaded {layer.layer_type} layer",
+        "description": description,
         "layer_type": layer.layer_type,
         "top_regions": top_regions,
+        "feature_attributes": attribute_samples,
     }
     return _apply_polygon_coverage_totals(ctx, features, user, locale)
 
@@ -816,14 +819,19 @@ def build_search_ai_context(ctx: dict) -> str:
     if kind == "layer":
         regions = ", ".join(_format_region_stat_line(r) for r in ctx.get("top_regions", [])) or "none listed"
         layer_type = ctx.get("layer_type") or "geometry"
+        desc = ctx.get("description") or "none"
+        attribute_block = _format_feature_attribute_block(ctx.get("feature_attributes") or [])
         return (
             f"User searched for uploaded map layer: {ctx['search_name']}\n"
             f"Layer type: {layer_type}\n"
+            f"Layer description: {desc}\n"
             f"Total mapped features on Terra Meta: {ctx['feature_count']}\n"
             f"{area_line}"
             f"Regions where this layer appears (ranked by area count): {regions}\n"
             f"Map center: {ctx['lat']:.4f}, {ctx['lng']:.4f}\n"
-            f"Important: Summarize using ONLY the mapped counts, regions, and km² values above. "
+            f"{attribute_block}"
+            f"Important: Summarize using ONLY the mapped counts, regions, km² values, "
+            f"layer description, and feature attributes above. "
             f"When asked about top regions, use the ranked region list.\n"
         )
 
@@ -1126,6 +1134,93 @@ def _feature_region_name(feature: MapFeature, lat: float, lng: float) -> str | N
     return region_at_point(lat, lng)
 
 
+_SKIP_PROPERTY_KEYS = {
+    "geometry",
+    "geom",
+    "shape",
+    "the_geom",
+    "wkb_geometry",
+    "shape_leng",
+    "shape_area",
+    "objectid",
+    "fid",
+    "gid",
+}
+
+
+def _serialize_feature_properties(props: dict | None, *, max_keys: int = 12) -> dict[str, str]:
+    if not isinstance(props, dict) or not props:
+        return {}
+    out: dict[str, str] = {}
+    for key, value in props.items():
+        if len(out) >= max_keys:
+            break
+        key_l = str(key).strip().lower()
+        if not key_l or key_l in _SKIP_PROPERTY_KEYS:
+            continue
+        if value is None or value == "":
+            continue
+        if isinstance(value, (dict, list)):
+            continue
+        text = str(value).strip()
+        if not text or len(text) > 160:
+            continue
+        out[str(key)] = text
+    return out
+
+
+def _feature_attribute_samples(
+    features: list[MapFeature],
+    *,
+    max_features: int = 8,
+) -> list[dict]:
+    samples: list[dict] = []
+    for feature in features[:max_features]:
+        props = _serialize_feature_properties(feature.properties or {})
+        layer = feature.layer
+        sample = {
+            "feature_id": feature.id,
+            "label": feature.label or "",
+            "layer_id": layer.id if layer else None,
+            "layer_name": layer.name if layer else "",
+            "layer_type": layer.layer_type if layer else "",
+            "layer_description": (layer.description or "").strip() if layer else "",
+            "properties": props,
+        }
+        if sample["label"] or sample["properties"] or sample["layer_description"]:
+            samples.append(sample)
+    return samples
+
+
+def _format_feature_attribute_block(samples: list[dict]) -> str:
+    if not samples:
+        return ""
+    lines = ["Layer feature attributes (from uploaded map data):"]
+    for sample in samples:
+        header_bits = [
+            bit
+            for bit in (
+                sample.get("layer_name"),
+                sample.get("layer_type"),
+                sample.get("label"),
+            )
+            if bit
+        ]
+        header = " · ".join(header_bits) or f"feature {sample.get('feature_id')}"
+        lines.append(f"- {header}")
+        desc = (sample.get("layer_description") or "").strip()
+        if desc:
+            lines.append(f"  layer description: {desc[:200]}")
+        props = sample.get("properties") or {}
+        for key, value in list(props.items())[:10]:
+            lines.append(f"  {key}: {value}")
+    lines.append(
+        "Use these attribute fields when answering questions about grades, host rock, "
+        "licenses, names, or other uploaded layer properties."
+    )
+    return "\n".join(lines) + "\n"
+
+
 def _layer_influence_radius_km(layer: MapLayer, zone_km2: float) -> float:
     """Per-layer influence radius: configured buffer or default analysis area."""
     from .map_view_area import analysis_zone_radius_km
@@ -1354,6 +1449,7 @@ def area_location_context(
     admin_boundary_id: int | None = None,
     exploration_geometry: dict | None = None,
     country_code: str = "TZ",
+    visible_layer_ids: list[int] | None = None,
 ) -> dict:
     from apps.geography.admin_boundary_service import lookup_boundaries_at_point
     from apps.geography.models import AdminBoundary, Country
@@ -1425,6 +1521,11 @@ def area_location_context(
                 continue
             matched.append(feature)
 
+    if visible_layer_ids:
+        allowed = set(visible_layer_ids)
+        matched = [feature for feature in matched if feature.layer_id in allowed]
+        anchor_features = [feature for feature in anchor_features if feature.layer_id in allowed]
+
     admin_lookup = {"region": None, "district": None, "ward": None, "village": None}
     try:
         country = Country.objects.get(code=country_code.upper())
@@ -1492,6 +1593,19 @@ def area_location_context(
         "top_regions": top_regions,
         "exploration_geometry": exploration_geometry,
         "direction_insights": direction_insights,
+        "feature_attributes": _feature_attribute_samples(matched),
+        "layer_notes": [
+            {
+                "layer_id": layer.id,
+                "name": localized_name(layer, locale),
+                "layer_type": layer.layer_type,
+                "description": (layer.description or "").strip(),
+            }
+            for layer in {
+                feature.layer_id: feature.layer for feature in matched if feature.layer_id
+            }.values()
+            if (layer.description or "").strip()
+        ],
     }
     result["country_code"] = country_code
     from apps.geography.geology_context import attach_geological_context
@@ -1640,6 +1754,14 @@ def build_area_ai_context(ctx: dict) -> str:
     terrain = ctx.get("terrain_context") or {}
     if terrain.get("ai_block"):
         terrain_block = f"{terrain['ai_block']}\n"
+    attribute_block = _format_feature_attribute_block(ctx.get("feature_attributes") or [])
+    layer_notes = ctx.get("layer_notes") or []
+    layer_notes_block = ""
+    if layer_notes:
+        layer_notes_block = "Layer descriptions:\n" + "\n".join(
+            f"- {note['name']} ({note['layer_type']}): {note['description'][:220]}"
+            for note in layer_notes[:6]
+        ) + "\n"
     return (
         f"{scope_line}"
         f"{admin_block}"
@@ -1647,13 +1769,16 @@ def build_area_ai_context(ctx: dict) -> str:
         f"{terrain_block}"
         f"{direction_block}"
         f"{geology_block}"
+        f"{layer_notes_block}"
+        f"{attribute_block}"
         f"Administrative region at click: {geo}\n"
         f"Mapped area region (from feature data): {region}\n"
         f"Minerals in this analysis area (mapped data only): {mineral_lines}\n"
         f"Mapped area count in this analysis area: {ctx['feature_count']}\n"
         f"Area labels: {labels}\n"
         f"Country: Tanzania\n"
-        f"Important: Only describe the location and minerals listed above. Do not infer geology for other areas.\n"
+        f"Important: Only describe the location, minerals, layer descriptions, and feature "
+        f"attributes listed above. Do not invent geology or attributes not present in the data.\n"
     )
 
 

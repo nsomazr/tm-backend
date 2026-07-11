@@ -67,10 +67,17 @@ MAPPED_LAYER_COUNT_FILTER = Q(
 
 
 def filter_layers_for_user(queryset, user):
-    """All users see active map geometry; mineral managers are scoped to assigned minerals."""
+    """Scope layers for the current viewer.
+
+    - Mineral managers (without admin) see only assigned minerals.
+    - Free / anonymous users only see layers marked ``is_preview`` (free map + legend).
+    - Paid users and admins see all active mapped layers.
+    """
     if user is not None and user.is_authenticated and user.role == User.Role.MINERAL_MANAGER and not user.is_admin_user:
         if not user.has_paid_access:
             managed_ids = list(user.mineral_assignments.values_list("mineral_id", flat=True))
             if managed_ids:
                 return queryset.filter(mineral_id__in=managed_ids)
+    if not user_has_map_detail_access(user):
+        return queryset.filter(is_preview=True)
     return queryset

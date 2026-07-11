@@ -29,7 +29,9 @@ class MineralCategoryViewSet(viewsets.ModelViewSet):
 
 
 class MineralViewSet(viewsets.ModelViewSet):
-    queryset = Mineral.objects.filter(is_active=True).select_related("category", "country")
+    queryset = Mineral.objects.filter(is_active=True).select_related(
+        "category", "country"
+    ).prefetch_related("associated_layers")
     serializer_class = MineralSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = "slug"
@@ -78,9 +80,9 @@ class MineralViewSet(viewsets.ModelViewSet):
         from apps.maps.access import filter_layers_for_user, layers_with_mapped_data
         from apps.maps.models import MapLayer
 
-        layers = MapLayer.objects.filter(mineral=mineral, is_active=True).select_related(
-            "mineral", "region"
-        )
+        owned = MapLayer.objects.filter(mineral=mineral, is_active=True)
+        associated = mineral.associated_layers.filter(is_active=True)
+        layers = (owned | associated).distinct().select_related("mineral", "region")
         layers = layers_with_mapped_data(layers)
         layers = filter_layers_for_user(layers, request.user)
         serializer = MapLayerSerializer(layers, many=True, context={"request": request})

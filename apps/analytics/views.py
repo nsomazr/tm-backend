@@ -140,6 +140,23 @@ def _build_area_insights_response(request):
     exploration_geometry = parse_exploration_geometry(
         _area_insight_param(request, "exploration_geometry")
     )
+    visible_layer_ids: list[int] = []
+    raw_visible = _area_insight_param(request, "visible_layer_ids", "")
+    if isinstance(raw_visible, list):
+        for part in raw_visible:
+            try:
+                visible_layer_ids.append(int(part))
+            except (TypeError, ValueError):
+                continue
+    elif raw_visible:
+        for part in str(raw_visible).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                visible_layer_ids.append(int(part))
+            except ValueError:
+                continue
     ctx = area_location_context(
         lat,
         lng,
@@ -151,6 +168,7 @@ def _build_area_insights_response(request):
         admin_boundary_id=boundary_id if not exploration_geometry else None,
         exploration_geometry=exploration_geometry,
         country_code=country_code,
+        visible_layer_ids=visible_layer_ids or None,
     )
     enrich_area_insight_context(ctx, basemap=basemap, locale=locale)
 
@@ -674,6 +692,24 @@ class TerraAssistantChatView(AIChatThrottleMixin, APIView):
                         except (TypeError, ValueError):
                             continue
 
+                visible_layer_ids: list[int] = []
+                raw_visible = request.data.get("visible_layer_ids") or []
+                if isinstance(raw_visible, list):
+                    for raw in raw_visible:
+                        try:
+                            visible_layer_ids.append(int(raw))
+                        except (TypeError, ValueError):
+                            continue
+                elif isinstance(raw_visible, str) and raw_visible.strip():
+                    for part in raw_visible.split(","):
+                        part = part.strip()
+                        if not part:
+                            continue
+                        try:
+                            visible_layer_ids.append(int(part))
+                        except ValueError:
+                            continue
+
                 boundary_id = None
                 raw_boundary = request.data.get("boundary_id") or request.data.get("admin_boundary_id")
                 if raw_boundary not in (None, ""):
@@ -700,6 +736,7 @@ class TerraAssistantChatView(AIChatThrottleMixin, APIView):
                     admin_boundary_id=boundary_id if not exploration_geometry else None,
                     exploration_geometry=exploration_geometry,
                     country_code=country_code,
+                    visible_layer_ids=visible_layer_ids or None,
                 )
                 enrich_area_insight_context(ctx, basemap=basemap, locale=locale)
                 context = build_area_ai_context(ctx)

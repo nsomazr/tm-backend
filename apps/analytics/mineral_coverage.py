@@ -74,6 +74,24 @@ def layers_for_catalog_slug(catalog_slug: str, *, country_code: str = "TZ") -> l
             if layer.slug == candidate:
                 add(layer)
 
+    mineral = Mineral.objects.filter(
+        is_active=True, country=country, slug=catalog_slug
+    ).prefetch_related("associated_layers").first()
+    if mineral is None:
+        # Periodic alias may map to a mineral with a different slug.
+        for layer in matched:
+            if layer.mineral_id:
+                mineral = (
+                    Mineral.objects.filter(pk=layer.mineral_id)
+                    .prefetch_related("associated_layers")
+                    .first()
+                )
+                if mineral:
+                    break
+    if mineral is not None:
+        for layer in mineral.associated_layers.filter(is_active=True).select_related("mineral"):
+            add(layer)
+
     return matched
 
 
