@@ -25,7 +25,7 @@ from apps.compliance.models import LicenseAgreement
 from apps.reports.models import Report
 from apps.subscriptions.models import SubscriptionPlan, UserSubscription
 
-from .models import Invoice, PaymentOrder
+from .models import DocumentEmailLog, Invoice, PaymentOrder
 from .serializers import (
     AdminPaymentOrderSerializer,
     CheckoutSerializer,
@@ -34,6 +34,9 @@ from .serializers import (
 )
 from .services import (
     activate_order,
+    email_payment_document,
+    ensure_invoice,
+    ensure_receipt,
     fail_order,
     refresh_order_status,
     start_snippe_card_checkout,
@@ -316,7 +319,8 @@ _ADMIN_ORDER_QUERYSET = PaymentOrder.objects.select_related(
     "report",
     "license_agreement",
     "invoice",
-)
+    "receipt",
+).prefetch_related("document_emails__sent_by")
 
 
 class AdminPaymentOrderListView(generics.ListAPIView):
@@ -362,4 +366,132 @@ class AdminCompleteOrderView(APIView):
             return Response(AdminPaymentOrderSerializer(order).data)
         activate_order(order, {"manual": True, "by": request.user.id})
         order.refresh_from_db()
+        return Response(AdminPaymentOrderSerializer(order).data)
+
+
+def _get_admin_order(reference: str) -> PaymentOrder:
+    return _ADMIN_ORDER_QUERYSET.get(merchant_reference=reference)
+
+
+class AdminGenerateInvoiceView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, reference):
+        try:
+            order = _get_admin_order(reference)
+        except PaymentOrder.DoesNotExist:
+            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+        ensure_invoice(order, regenerate=bool(request.data.get("regenerate")))
+        order = _get_admin_order(reference)
+        return Response(AdminPaymentOrderSerializer(order).data)
+
+
+class AdminGenerateReceiptView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, reference):
+        try:
+            order = _get_admin_order(reference)
+        except PaymentOrder.DoesNotExist:
+            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            ensure_receipt(order, regenerate=bool(request.data.get("regenerate")))
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        order = _get_admin_order(reference)
+        return Response(AdminPaymentOrderSerializer(order).data)
+
+
+class AdminDownloadInvoiceView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request, reference):
+        from django.http import FileResponse
+
+        try:
+            order = _get_admin_order(reference)
+        except PaymentOrder.DoesNotExist:
+            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+        invoice = ensure_invoice(order)
+        if not invoice.pdf_file:
+            return Response({"detail": "Invoice PDF missing."}, status=status.HTTP_404_NOT_FOUND)
+        return FileResponse(
+            invoice.pdf_file.open("rb"),
+            as_attachment=True,
+            filename=f"{invoice.invoice_number}.pdf",
+            content_type="application/pdf",
+        )
+
+
+class AdminDownloadReceiptView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request, reference):
+        from django.http import FileResponse
+
+        try:
+            order = _get_admin_order(reference)
+        except PaymentOrder.DoesNotExist:
+            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            receipt = ensure_receipt(order)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        if not receipt.pdf_file:
+            return Response({"detail": "Receipt PDF missing."}, status=status.HTTP_404_NOT_FOUND)
+        return FileResponse(
+            receipt.pdf_file.open("rb"),
+            as_attachment=True,
+            filename=f"{receipt.receipt_number}.pdf",
+            content_type="application/pdf",
+        )
+
+
+class AdminEmailInvoiceView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, reference):
+        try:
+            order = _get_admin_order(reference)
+        except PaymentOrder.DoesNotExist:
+            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+        to_email = (request.data.get("email") or "").strip() or None
+        try:
+            email_payment_document(
+                order,
+                DocumentEmailLog.DocumentType.INVOICE,
+                to_email=to_email,
+                sent_by=request.user,
+                regenerate=bool(request.data.get("regenerate")),
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        order = _get_admin_order(reference)
+        return Response(AdminPaymentOrderSerializer(order).data)
+
+
+class AdminEmailReceiptView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, reference):
+        try:
+            order = _get_admin_order(reference)
+        except PaymentOrder.DoesNotExist:
+            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+        to_email = (request.data.get("email") or "").strip() or None
+        try:
+            email_payment_document(
+                order,
+                DocumentEmailLog.DocumentType.RECEIPT,
+                to_email=to_email,
+                sent_by=request.user,
+                regenerate=bool(request.data.get("regenerate")),
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        order = _get_admin_order(reference)
         return Response(AdminPaymentOrderSerializer(order).data)

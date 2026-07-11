@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Invoice, PaymentOrder
+from .models import DocumentEmailLog, Invoice, PaymentOrder, Receipt
 
 
 class PaymentOrderSerializer(serializers.ModelSerializer):
@@ -21,12 +21,50 @@ class PaymentOrderSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+def _document_summary(document, *, number_attr: str):
+    if document is None:
+        return None
+    request = None
+    # filled by AdminPaymentOrderSerializer.get_* via context
+    return {
+        "number": getattr(document, number_attr),
+        "issued_at": document.issued_at,
+        "has_pdf": bool(document.pdf_file),
+        "email_sent_at": document.email_sent_at,
+        "email_sent_to": document.email_sent_to or None,
+        "email_send_count": document.email_send_count,
+        "email_last_error": document.email_last_error or None,
+    }
+
+
+class DocumentEmailLogSerializer(serializers.ModelSerializer):
+    sent_by_email = serializers.EmailField(source="sent_by.email", read_only=True, allow_null=True)
+
+    class Meta:
+        model = DocumentEmailLog
+        fields = (
+            "id",
+            "document_type",
+            "document_number",
+            "sent_to",
+            "sent_by_email",
+            "status",
+            "error",
+            "created_at",
+        )
+        read_only_fields = fields
+
+
 class AdminPaymentOrderSerializer(serializers.ModelSerializer):
     user_email = serializers.EmailField(source="user.email", read_only=True)
     user_username = serializers.CharField(source="user.username", read_only=True)
     description = serializers.SerializerMethodField()
     invoice_number = serializers.SerializerMethodField()
     invoice_issued_at = serializers.SerializerMethodField()
+    invoice = serializers.SerializerMethodField()
+    receipt = serializers.SerializerMethodField()
+    receipt_number = serializers.SerializerMethodField()
+    document_emails = serializers.SerializerMethodField()
     subscription_detail = serializers.SerializerMethodField()
     report_detail = serializers.SerializerMethodField()
     license_detail = serializers.SerializerMethodField()
@@ -58,6 +96,10 @@ class AdminPaymentOrderSerializer(serializers.ModelSerializer):
             "aerial_detail",
             "invoice_number",
             "invoice_issued_at",
+            "invoice",
+            "receipt_number",
+            "receipt",
+            "document_emails",
             "activation_source",
             "gateway_response",
             "created_at",
@@ -77,6 +119,22 @@ class AdminPaymentOrderSerializer(serializers.ModelSerializer):
     def get_invoice_issued_at(self, obj):
         invoice = getattr(obj, "invoice", None)
         return invoice.issued_at if invoice else None
+
+    def get_invoice(self, obj):
+        return _document_summary(getattr(obj, "invoice", None), number_attr="invoice_number")
+
+    def get_receipt_number(self, obj):
+        receipt = getattr(obj, "receipt", None)
+        return receipt.receipt_number if receipt else None
+
+    def get_receipt(self, obj):
+        return _document_summary(getattr(obj, "receipt", None), number_attr="receipt_number")
+
+    def get_document_emails(self, obj):
+        logs = getattr(obj, "_prefetched_objects_cache", {}).get("document_emails")
+        if logs is None:
+            logs = obj.document_emails.select_related("sent_by").all()[:12]
+        return DocumentEmailLogSerializer(logs, many=True).data
 
     def get_subscription_detail(self, obj):
         if not obj.subscription_id:

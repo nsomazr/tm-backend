@@ -10,6 +10,7 @@ from django.urls import reverse
 _BLOCKED_MEDIA_PREFIXES = (
     "reports/",
     "invoices/",
+    "receipts/",
     "exploration_reports/",
     "layer_uploads/",
     "layer_imports/",

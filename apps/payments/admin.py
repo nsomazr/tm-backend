@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Invoice, PaymentOrder
+from .models import DocumentEmailLog, Invoice, PaymentOrder, Receipt
 
 
 @admin.register(PaymentOrder)
@@ -24,5 +24,37 @@ class PaymentOrderAdmin(admin.ModelAdmin):
 
 @admin.register(Invoice)
 class InvoiceAdmin(admin.ModelAdmin):
-    list_display = ("invoice_number", "user", "amount", "currency", "issued_at")
-    search_fields = ("invoice_number", "user__email")
+    list_display = (
+        "invoice_number",
+        "user",
+        "amount",
+        "currency",
+        "issued_at",
+        "email_sent_at",
+        "email_send_count",
+    )
+    search_fields = ("invoice_number", "user__email", "email_sent_to")
+    readonly_fields = ("issued_at", "email_sent_at", "email_send_count", "email_last_error")
+
+
+@admin.register(Receipt)
+class ReceiptAdmin(admin.ModelAdmin):
+    list_display = (
+        "receipt_number",
+        "user",
+        "amount",
+        "currency",
+        "issued_at",
+        "email_sent_at",
+        "email_send_count",
+    )
+    search_fields = ("receipt_number", "user__email", "email_sent_to")
+    readonly_fields = ("issued_at", "email_sent_at", "email_send_count", "email_last_error")
+
+
+@admin.register(DocumentEmailLog)
+class DocumentEmailLogAdmin(admin.ModelAdmin):
+    list_display = ("document_type", "document_number", "sent_to", "status", "sent_by", "created_at")
+    list_filter = ("document_type", "status")
+    search_fields = ("document_number", "sent_to", "payment_order__merchant_reference")
+    readonly_fields = ("created_at",)

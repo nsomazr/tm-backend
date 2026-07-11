@@ -1,21 +1,23 @@
+import logging
 import re
 import uuid
 from datetime import date, timedelta
 from io import BytesIO
 
 from celery import shared_task
+from django.conf import settings
+from django.core.files.base import ContentFile
+from django.core.mail import EmailMultiAlternatives
 from django.utils import timezone
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
-
-from django.conf import settings
 
 from apps.accounts.models import User
 from apps.analytics.models import AerialAnalysisGrant
 from apps.compliance.models import LicenseAgreement
 from apps.subscriptions.models import DownloadPurchase, UserSubscription
 
-from .models import Invoice, PaymentOrder
+from .models import DocumentEmailLog, Invoice, PaymentOrder, Receipt
 from .snippe import (
     SnippeClient,
     SnippeError,
@@ -27,47 +29,7 @@ from .snippe import (
     snippe_webhook_url,
 )
 
-
-@shared_task
-def generate_invoice(payment_order_id):
-    order = PaymentOrder.objects.select_related("user").get(id=payment_order_id)
-    if hasattr(order, "invoice"):
-        return order.invoice.id
-
-    invoice_number = f"TM-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
-    description = _order_description(order)
-
-    buffer = BytesIO()
-    p = canvas.Canvas(buffer, pagesize=letter)
-    p.setFont("Helvetica-Bold", 16)
-    p.drawString(72, 750, "Terra Meta Invoice")
-    p.setFont("Helvetica", 12)
-    p.drawString(72, 720, f"Invoice #: {invoice_number}")
-    p.drawString(72, 700, f"Date: {timezone.now().strftime('%Y-%m-%d')}")
-    p.drawString(72, 680, f"Customer: {order.user.get_full_name() or order.user.username}")
-    p.drawString(72, 660, f"Email: {order.user.email}")
-    p.drawString(72, 630, f"Description: {description}")
-    p.drawString(72, 610, f"Amount: {order.amount} {order.currency}")
-    p.drawString(72, 590, f"Status: {order.status}")
-    p.showPage()
-    p.save()
-
-    from django.core.files.base import ContentFile
-
-    invoice = Invoice.objects.create(
-        invoice_number=invoice_number,
-        user=order.user,
-        payment_order=order,
-        amount=order.amount,
-        currency=order.currency,
-        description=description,
-    )
-    invoice.pdf_file.save(
-        f"{invoice_number}.pdf",
-        ContentFile(buffer.getvalue()),
-        save=True,
-    )
-    return invoice.id
+logger = logging.getLogger(__name__)
 
 
 def order_description(order):
@@ -93,6 +55,229 @@ def order_description(order):
 
 def _order_description(order):
     return order_description(order)
+
+
+def _render_payment_pdf(*, title: str, document_number: str, order: PaymentOrder, description: str) -> bytes:
+    buffer = BytesIO()
+    p = canvas.Canvas(buffer, pagesize=letter)
+    p.setFont("Helvetica-Bold", 16)
+    p.drawString(72, 750, title)
+    p.setFont("Helvetica", 12)
+    p.drawString(72, 720, f"Number: {document_number}")
+    p.drawString(72, 700, f"Date: {timezone.now().strftime('%Y-%m-%d')}")
+    p.drawString(72, 680, f"Customer: {order.user.get_full_name() or order.user.username}")
+    p.drawString(72, 660, f"Email: {order.user.email}")
+    p.drawString(72, 640, f"Order ref: {order.merchant_reference}")
+    p.drawString(72, 610, f"Description: {description}")
+    p.drawString(72, 590, f"Amount: {order.amount} {order.currency}")
+    p.drawString(72, 570, f"Payment status: {order.status}")
+    p.drawString(72, 550, f"Provider: {order.payment_provider}")
+    p.showPage()
+    p.save()
+    return buffer.getvalue()
+
+
+def ensure_invoice(order: PaymentOrder, *, regenerate: bool = False) -> Invoice:
+    """Create (or optionally regenerate) the invoice PDF for an order."""
+    existing = getattr(order, "invoice", None)
+    if existing and not regenerate:
+        if not existing.pdf_file:
+            pdf = _render_payment_pdf(
+                title="Terra Meta Invoice",
+                document_number=existing.invoice_number,
+                order=order,
+                description=existing.description or order_description(order),
+            )
+            existing.pdf_file.save(f"{existing.invoice_number}.pdf", ContentFile(pdf), save=True)
+        return existing
+
+    description = order_description(order)
+    if existing and regenerate:
+        invoice_number = existing.invoice_number
+        invoice = existing
+        invoice.amount = order.amount
+        invoice.currency = order.currency
+        invoice.description = description
+        invoice.save(update_fields=["amount", "currency", "description"])
+    else:
+        invoice_number = f"TM-INV-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        invoice = Invoice.objects.create(
+            invoice_number=invoice_number,
+            user=order.user,
+            payment_order=order,
+            amount=order.amount,
+            currency=order.currency,
+            description=description,
+        )
+
+    pdf = _render_payment_pdf(
+        title="Terra Meta Invoice",
+        document_number=invoice_number,
+        order=order,
+        description=description,
+    )
+    invoice.pdf_file.save(f"{invoice_number}.pdf", ContentFile(pdf), save=True)
+    return invoice
+
+
+def ensure_receipt(order: PaymentOrder, *, regenerate: bool = False) -> Receipt:
+    """Create a payment receipt (completed orders only)."""
+    if order.status != PaymentOrder.Status.COMPLETED:
+        raise ValueError("Receipts can only be generated for completed orders.")
+
+    existing = getattr(order, "receipt", None)
+    if existing and not regenerate:
+        if not existing.pdf_file:
+            pdf = _render_payment_pdf(
+                title="Terra Meta Receipt",
+                document_number=existing.receipt_number,
+                order=order,
+                description=existing.description or order_description(order),
+            )
+            existing.pdf_file.save(f"{existing.receipt_number}.pdf", ContentFile(pdf), save=True)
+        return existing
+
+    description = order_description(order)
+    if existing and regenerate:
+        receipt_number = existing.receipt_number
+        receipt = existing
+        receipt.amount = order.amount
+        receipt.currency = order.currency
+        receipt.description = description
+        receipt.save(update_fields=["amount", "currency", "description"])
+    else:
+        receipt_number = f"TM-RCP-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        receipt = Receipt.objects.create(
+            receipt_number=receipt_number,
+            user=order.user,
+            payment_order=order,
+            amount=order.amount,
+            currency=order.currency,
+            description=description,
+        )
+
+    pdf = _render_payment_pdf(
+        title="Terra Meta Receipt",
+        document_number=receipt_number,
+        order=order,
+        description=description,
+    )
+    receipt.pdf_file.save(f"{receipt_number}.pdf", ContentFile(pdf), save=True)
+    return receipt
+
+
+@shared_task
+def generate_invoice(payment_order_id):
+    order = PaymentOrder.objects.select_related(
+        "user", "subscription__plan", "report", "license_agreement"
+    ).get(id=payment_order_id)
+    return ensure_invoice(order).id
+
+
+@shared_task
+def generate_receipt(payment_order_id):
+    order = PaymentOrder.objects.select_related(
+        "user", "subscription__plan", "report", "license_agreement"
+    ).get(id=payment_order_id)
+    return ensure_receipt(order).id
+
+
+def email_payment_document(
+    order: PaymentOrder,
+    document_type: str,
+    *,
+    to_email: str | None = None,
+    sent_by: User | None = None,
+    regenerate: bool = False,
+) -> DocumentEmailLog:
+    """Email invoice or receipt PDF to the customer (or an override address)."""
+    recipient = (to_email or order.user.email or "").strip()
+    if not recipient:
+        raise ValueError("No email address available for this customer.")
+
+    if document_type == DocumentEmailLog.DocumentType.INVOICE:
+        document = ensure_invoice(order, regenerate=regenerate)
+        document_number = document.invoice_number
+        subject = f"Terra Meta invoice {document_number}"
+        label = "invoice"
+    elif document_type == DocumentEmailLog.DocumentType.RECEIPT:
+        document = ensure_receipt(order, regenerate=regenerate)
+        document_number = document.receipt_number
+        subject = f"Terra Meta receipt {document_number}"
+        label = "receipt"
+    else:
+        raise ValueError("document_type must be invoice or receipt.")
+
+    if not document.pdf_file:
+        raise ValueError(f"{label.capitalize()} PDF is missing.")
+
+    description = document.description or order_description(order)
+    text_body = (
+        f"Hello,\n\n"
+        f"Please find attached your Terra Meta {label} ({document_number}).\n\n"
+        f"Order: {order.merchant_reference}\n"
+        f"Amount: {order.amount} {order.currency}\n"
+        f"Description: {description}\n\n"
+        f"— Terra Meta billing\n"
+    )
+    html_body = (
+        f"<p>Hello,</p>"
+        f"<p>Please find attached your Terra Meta <strong>{label}</strong> "
+        f"(<code>{document_number}</code>).</p>"
+        f"<ul>"
+        f"<li>Order: <code>{order.merchant_reference}</code></li>"
+        f"<li>Amount: <strong>{order.amount} {order.currency}</strong></li>"
+        f"<li>Description: {description}</li>"
+        f"</ul>"
+        f"<p>— Terra Meta billing</p>"
+    )
+
+    log = DocumentEmailLog(
+        payment_order=order,
+        document_type=document_type,
+        document_number=document_number,
+        sent_to=recipient,
+        sent_by=sent_by,
+        status=DocumentEmailLog.Status.FAILED,
+    )
+
+    try:
+        message = EmailMultiAlternatives(
+            subject,
+            text_body,
+            settings.DEFAULT_FROM_EMAIL,
+            [recipient],
+            reply_to=[settings.EMAIL_HOST_USER or "admin@5ggeology.com"],
+        )
+        message.attach_alternative(html_body, "text/html")
+        pdf_name = f"{document_number}.pdf"
+        document.pdf_file.open("rb")
+        try:
+            message.attach(pdf_name, document.pdf_file.read(), "application/pdf")
+        finally:
+            document.pdf_file.close()
+        message.send(fail_silently=False)
+
+        now = timezone.now()
+        document.email_sent_at = now
+        document.email_sent_to = recipient
+        document.email_send_count = (document.email_send_count or 0) + 1
+        document.email_last_error = ""
+        document.save(
+            update_fields=["email_sent_at", "email_sent_to", "email_send_count", "email_last_error"]
+        )
+        log.status = DocumentEmailLog.Status.SENT
+        log.save()
+        logger.info("Sent %s %s to %s", label, document_number, recipient)
+    except Exception as exc:
+        log.error = str(exc)
+        log.save()
+        document.email_last_error = str(exc)
+        document.save(update_fields=["email_last_error"])
+        logger.exception("Failed sending %s %s to %s", label, document_number, recipient)
+        raise
+
+    return log
 
 
 def _cancel_other_subscriptions(user, active_sub):
@@ -165,7 +350,16 @@ def activate_order(order, transaction_data=None):
             license_agreement.end_date = date.today() + timedelta(days=365)
         license_agreement.save(update_fields=["status", "start_date", "end_date"])
 
-    generate_invoice.delay(order.id)
+    # Sync generation so admin/dev work without a Celery worker.
+    order = PaymentOrder.objects.select_related(
+        "user", "subscription__plan", "report", "license_agreement"
+    ).get(pk=order.pk)
+    ensure_invoice(order)
+    ensure_receipt(order)
+    try:
+        generate_invoice.delay(order.id)
+    except Exception:
+        logger.debug("Celery unavailable; invoice already generated synchronously", exc_info=True)
 
 
 def fail_order(order, transaction_data=None):

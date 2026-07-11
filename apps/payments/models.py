@@ -87,9 +87,77 @@ class Invoice(models.Model):
     description = models.TextField(blank=True)
     pdf_file = models.FileField(upload_to="invoices/", blank=True)
     issued_at = models.DateTimeField(auto_now_add=True)
+    email_sent_at = models.DateTimeField(null=True, blank=True)
+    email_sent_to = models.EmailField(blank=True)
+    email_send_count = models.PositiveIntegerField(default=0)
+    email_last_error = models.TextField(blank=True)
 
     class Meta:
         ordering = ["-issued_at"]
 
     def __str__(self):
         return self.invoice_number
+
+
+class Receipt(models.Model):
+    receipt_number = models.CharField(max_length=50, unique=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="receipts",
+    )
+    payment_order = models.OneToOneField(
+        PaymentOrder,
+        on_delete=models.CASCADE,
+        related_name="receipt",
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=3, default="TZS")
+    description = models.TextField(blank=True)
+    pdf_file = models.FileField(upload_to="receipts/", blank=True)
+    issued_at = models.DateTimeField(auto_now_add=True)
+    email_sent_at = models.DateTimeField(null=True, blank=True)
+    email_sent_to = models.EmailField(blank=True)
+    email_send_count = models.PositiveIntegerField(default=0)
+    email_last_error = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-issued_at"]
+
+    def __str__(self):
+        return self.receipt_number
+
+
+class DocumentEmailLog(models.Model):
+    class DocumentType(models.TextChoices):
+        INVOICE = "invoice", "Invoice"
+        RECEIPT = "receipt", "Receipt"
+
+    class Status(models.TextChoices):
+        SENT = "sent", "Sent"
+        FAILED = "failed", "Failed"
+
+    payment_order = models.ForeignKey(
+        PaymentOrder,
+        on_delete=models.CASCADE,
+        related_name="document_emails",
+    )
+    document_type = models.CharField(max_length=20, choices=DocumentType.choices)
+    document_number = models.CharField(max_length=50, blank=True)
+    sent_to = models.EmailField()
+    sent_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="payment_document_emails",
+    )
+    status = models.CharField(max_length=20, choices=Status.choices)
+    error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.document_type} → {self.sent_to} ({self.status})"
