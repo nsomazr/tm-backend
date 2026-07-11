@@ -171,17 +171,20 @@ def build_payment_document_pdf(
     provider_display = (order.payment_provider or "").replace("_", " ").title()
     order_type_display = (order.order_type or "").replace("_", " ").title()
 
+    id_label = f"{title} ID"
     story: list = []
 
     # Document type chip + title
     story.append(_plain(title.upper(), badge_style))
     story.append(_plain(f"Terra Meta {title}", title_style))
+    story.append(_plain(id_label.upper(), label_style))
     story.append(
         _p(
-            f"Document <b>{_escape(document_number)}</b> · Issued {_escape(issued_date)}",
-            body_style,
+            f"<font face='Courier' size='11'><b>{_escape(document_number)}</b></font>",
+            value_style,
         )
     )
+    story.append(_plain(f"Issued {issued_date}", body_style))
 
     story.append(
         HRFlowable(
@@ -200,8 +203,16 @@ def build_payment_document_pdf(
         Paragraph(_escape(customer_email), body_style),
     ]
     right_meta = [
+        Paragraph(_escape(id_label.upper()), label_style),
+        Paragraph(
+            f"<font face='Courier' size='9'>{_escape(document_number)}</font>",
+            value_style,
+        ),
         Paragraph("ORDER REFERENCE", label_style),
-        Paragraph(f"<font face='Courier' size='9'>{_escape(str(order.merchant_reference))}</font>", value_style),
+        Paragraph(
+            f"<font face='Courier' size='9'>{_escape(str(order.merchant_reference))}</font>",
+            value_style,
+        ),
         Paragraph("PAYMENT TYPE", label_style),
         Paragraph(_escape(order_type_display), value_style),
     ]
@@ -328,20 +339,6 @@ def build_payment_document_pdf(
             canvas.drawString(left, page_top - doc.topMargin + 0.35 * inch, "Terra Meta")
             line_y = page_top - doc.topMargin + 0.18 * inch
 
-        if icon_path and wordmark_path:
-            try:
-                canvas.drawImage(
-                    str(icon_path),
-                    right - 0.42 * inch,
-                    page_top - doc.topMargin + 0.28 * inch,
-                    width=0.38 * inch,
-                    height=0.38 * inch,
-                    preserveAspectRatio=True,
-                    mask="auto",
-                )
-            except Exception:
-                pass
-
         canvas.setStrokeColor(_GREEN_300)
         canvas.setLineWidth(0.9)
         canvas.line(left, line_y, right, line_y)
@@ -354,11 +351,29 @@ def build_payment_document_pdf(
         footer_y = 0.42 * inch
         canvas.setStrokeColor(colors.HexColor("#e2e8f0"))
         canvas.setLineWidth(0.6)
-        canvas.line(left, footer_y + 0.22 * inch, right, footer_y + 0.22 * inch)
+        canvas.line(left, footer_y + 0.28 * inch, right, footer_y + 0.28 * inch)
+
+        icon_size = 0.32 * inch
+        text_x = left
+        if icon_path:
+            try:
+                canvas.drawImage(
+                    str(icon_path),
+                    left,
+                    footer_y - 0.04 * inch,
+                    width=icon_size,
+                    height=icon_size,
+                    preserveAspectRatio=True,
+                    mask="auto",
+                )
+                text_x = left + icon_size + 0.1 * inch
+            except Exception:
+                pass
+
         canvas.setFont("Helvetica", 8)
         canvas.setFillColor(_SLATE_500)
-        canvas.drawString(left, footer_y, "Terra Meta · 5G Geology Futures")
-        canvas.drawRightString(right, footer_y, f"{title} · {document_number}")
+        canvas.drawString(text_x, footer_y + 0.06 * inch, "Terra Meta · 5G Geology Futures")
+        canvas.drawRightString(right, footer_y + 0.06 * inch, f"{title} · {document_number}")
         canvas.restoreState()
 
     doc.build(story, onFirstPage=_draw_page, onLaterPages=_draw_page)
