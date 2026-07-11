@@ -171,8 +171,8 @@ REST_FRAMEWORK = {
 
 # Coordinate precision (decimal places) served to anonymous / free users on map
 # layer geometry. Paid users, admins and mineral managers always get full
-# resolution. 2 dp ≈ 1.1 km, 3 dp ≈ 110 m, 4 dp ≈ 11 m.
-MAP_PREVIEW_COORD_DECIMALS = int(os.getenv("MAP_PREVIEW_COORD_DECIMALS", "2"))
+# resolution. 2 dp ≈ 1.1 km (collapses small claims), 3 dp ≈ 110 m, 4 dp ≈ 11 m.
+MAP_PREVIEW_COORD_DECIMALS = int(os.getenv("MAP_PREVIEW_COORD_DECIMALS", "3"))
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(hours=1),

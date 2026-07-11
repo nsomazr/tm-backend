@@ -19,9 +19,10 @@ def preview_coord_decimals() -> int:
 
     Fewer decimals => coarser location (2 ≈ 1.1 km, 3 ≈ 110 m, 4 ≈ 11 m). This
     keeps the free map a usable teaser while making exact dig coordinates
-    unusable for bulk scraping. Configurable via MAP_PREVIEW_COORD_DECIMALS.
+    unusable for bulk scraping. Configurable via MAP_PREVIEW_COORD_DECIMALS
+    (default 3 so small claim polygons still render).
     """
-    return int(getattr(settings, "MAP_PREVIEW_COORD_DECIMALS", 2))
+    return int(getattr(settings, "MAP_PREVIEW_COORD_DECIMALS", 3))
 
 
 def _round_coords(coords, ndigits):
