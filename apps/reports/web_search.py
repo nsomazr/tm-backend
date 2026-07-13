@@ -57,7 +57,7 @@ def strip_references_section(text: str) -> str:
     if not text or not text.strip():
         return ""
     pattern = re.compile(
-        rf"\n\s*{re.escape(REFERENCES_HEADING)}\s*\n[\s\S]*$",
+        r"\n\s*References(?:\s+and\s+Sources)?\s*\n[\s\S]*$",
         re.IGNORECASE,
     )
     stripped = pattern.sub("", text.rstrip())

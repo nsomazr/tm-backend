@@ -132,6 +132,12 @@ def _open_inline_tag(tag: str, attrs: list[tuple[str, str | None]]) -> str:
         return "<u>"
     if tag == "br":
         return "<br/>"
+    if tag == "a":
+        href = (attr_map.get("href") or "").strip()
+        if href:
+            # Keep the visible link text; append URL after the closing tag via a marker.
+            return f'<font color="#166534"><link href="{_escape_xml(href)}">'
+        return '<font color="#166534">'
     if tag == "font":
         color = attr_map.get("color")
         if color:
@@ -152,6 +158,8 @@ def _close_inline_tag(tag: str) -> str:
         return "</i>"
     if tag == "u":
         return "</u>"
+    if tag == "a":
+        return "</link></font>"
     if tag in ("font", "span"):
         return "</font>"
     return ""
@@ -300,14 +308,31 @@ class _ReportPdfHtmlParser(HTMLParser):
         self._flush()
 
 
+def _is_references_heading(text: str) -> bool:
+    return str(text or "").strip().lower().startswith("references")
+
+
+def _is_key_findings_heading(text: str) -> bool:
+    return str(text or "").strip().lower() == _KEY_FINDINGS_HEADING_LOWER
+
+
 def _parse_plain_summary_blocks(text: str) -> list[dict]:
     blocks: list[dict] = []
     for paragraph in [part.strip() for part in text.split("\n\n") if part.strip()]:
-        if paragraph.lower() == _KEY_FINDINGS_HEADING_LOWER:
+        lower = paragraph.lower()
+        if _is_key_findings_heading(paragraph) or _is_references_heading(paragraph):
             blocks.append({"type": "heading", "level": 2, "text": paragraph})
+            continue
+        if lower == _REFERENCES_HEADING_LOWER:
+            blocks.append({"type": "heading", "level": 2, "text": REFERENCES_HEADING})
             continue
         if len(paragraph) < 80 and paragraph == paragraph.title() and " " in paragraph:
             blocks.append({"type": "heading", "level": 2, "text": paragraph})
+            continue
+        # Numbered reference lines as list items when possible.
+        lines = [line.strip() for line in paragraph.split("\n") if line.strip()]
+        if lines and all(re.match(r"^\d+\.\s+", line) for line in lines):
+            blocks.append({"type": "list", "items": lines})
             continue
         blocks.append({"type": "paragraph", "markup": _escape_xml(paragraph)})
     return blocks
@@ -324,32 +349,71 @@ def _parse_summary_html_blocks(summary: str) -> list[dict]:
     return parser.blocks
 
 
-def _split_body_and_findings(blocks: list[dict]) -> tuple[list[dict], list[str]]:
+def _split_body_findings_and_references(
+    blocks: list[dict],
+) -> tuple[list[dict], list[str], list[dict]]:
     body: list[dict] = []
     findings: list[str] = []
+    references: list[dict] = []
     in_findings = False
+    in_references = False
 
     for block in blocks:
         if block.get("type") == "heading":
-            heading = str(block.get("text", "")).strip().lower()
-            if heading == _KEY_FINDINGS_HEADING_LOWER:
+            heading = str(block.get("text", "")).strip()
+            if _is_key_findings_heading(heading):
                 in_findings = True
+                in_references = False
                 continue
-            if in_findings and heading == _REFERENCES_HEADING_LOWER:
+            if _is_references_heading(heading):
                 in_findings = False
-                body.append(block)
+                in_references = True
+                references.append(
+                    {"type": "heading", "level": 2, "text": REFERENCES_HEADING}
+                )
                 continue
+            if in_findings:
+                # A new non-reference section ends findings.
+                in_findings = False
+            if in_references:
+                references.append(block)
+                continue
+            body.append(block)
+            continue
+
+        if in_references:
+            references.append(block)
+            continue
+
         if in_findings:
             if block.get("type") == "list":
-                findings.extend(str(item).strip() for item in block.get("items", []) if str(item).strip())
+                findings.extend(
+                    str(item).strip() for item in block.get("items", []) if str(item).strip()
+                )
             elif block.get("type") == "paragraph":
                 plain = _html_to_report_text(str(block.get("markup", "")))
                 if plain:
                     findings.append(plain)
             continue
+
         body.append(block)
 
-    return body, filter_report_findings(findings)
+    cleaned_findings = filter_report_findings(findings)
+    recovered = [item for item in findings if item and item not in cleaned_findings]
+    if recovered and not references:
+        references = [
+            {"type": "heading", "level": 2, "text": REFERENCES_HEADING},
+            {"type": "list", "items": recovered},
+        ]
+    elif recovered and references:
+        # Append citation-like leftovers that were nested under Key Findings.
+        existing_lists = [b for b in references if b.get("type") == "list"]
+        if existing_lists:
+            existing_lists[-1]["items"] = list(existing_lists[-1].get("items") or []) + recovered
+        else:
+            references.append({"type": "list", "items": recovered})
+
+    return body, cleaned_findings, references
 
 
 def _wrap_text(text: str, style: ParagraphStyle) -> Paragraph:
@@ -510,7 +574,9 @@ def build_report_pdf_bytes(report: Report) -> bytes:
 
     summary_html = summary_obj.summary if summary_obj else ""
     summary_blocks = _parse_summary_html_blocks(summary_html)
-    body_blocks, embedded_findings = _split_body_and_findings(summary_blocks)
+    body_blocks, embedded_findings, reference_blocks = _split_body_findings_and_references(
+        summary_blocks
+    )
 
     if body_blocks:
         content_width = doc.width
@@ -540,6 +606,7 @@ def build_report_pdf_bytes(report: Report) -> bytes:
     elif not findings and summary_html:
         plain = _html_to_report_text(summary_html)
         findings = [line.strip("- •") for line in plain.split("\n") if line.strip().startswith(("-", "•"))][:12]
+        findings = filter_report_findings(findings)
 
     if findings:
         story.append(_wrap_text("Key findings", section_style))
@@ -555,6 +622,18 @@ def build_report_pdf_bytes(report: Report) -> bytes:
             items.append(ListItem(para, leftIndent=12))
         if items:
             story.append(ListFlowable(items, bulletType="bullet", start="•"))
+
+    if reference_blocks:
+        content_width = doc.width
+        _append_summary_blocks(
+            story,
+            reference_blocks,
+            section_style=section_style,
+            subsection_style=subsection_style,
+            body_style=body_style,
+            bullet_style=bullet_style,
+            content_width=content_width,
+        )
 
     story.append(Spacer(1, 0.25 * inch))
     story.append(

@@ -58,6 +58,16 @@ class Report(models.Model):
     center_lat = models.FloatField(null=True, blank=True)
     center_lng = models.FloatField(null=True, blank=True)
     zoom = models.PositiveSmallIntegerField(null=True, blank=True)
+    geometry = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Optional GeoJSON Point or Polygon AOI for the report.",
+    )
+    buffer_km = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text="Optional buffer (km) around geometry; max 20.",
+    )
     article_body = models.JSONField(default=list, blank=True)
     layers = models.ManyToManyField(
         "maps.MapLayer",

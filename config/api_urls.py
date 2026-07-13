@@ -14,5 +14,6 @@ urlpatterns = [
     path("analytics/", include("apps.analytics.urls")),
     path("compliance/", include("apps.compliance.urls")),
     path("ads/", include("apps.ads.urls")),
+    path("marketplace/", include("apps.marketplace.urls")),
     path("admin/", include("apps.accounts.admin_urls")),
 ]

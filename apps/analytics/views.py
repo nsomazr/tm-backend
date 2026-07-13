@@ -1,4 +1,4 @@
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.http import FileResponse
 from django.utils import timezone
 import io
@@ -15,12 +15,9 @@ from rest_framework.views import APIView
 from apps.accounts.models import User
 from apps.accounts.permissions import IsAdminUser
 from apps.maps.access import (
-    MAPPED_LAYER_COUNT_FILTER,
-    layers_with_mapped_data,
     user_has_map_detail_access,
 )
 from apps.maps.localization import get_request_locale, localized_name
-from apps.maps.models import MapFeature, MapLayer
 from apps.minerals.models import Mineral
 from apps.analytics.credits import (
     InsufficientAssistantCredits,
@@ -62,7 +59,13 @@ from .insight_export import _decode_map_snapshot, build_insight_export_for_user
 
 from .aerial import included_aerial_km2, user_can_access_aerial_analysis
 from .admin_stats import build_admin_platform_analytics
-from .coverage_stats import build_feature_coverage_stats, build_layer_inventory
+from .coverage_stats import (
+    ANALYTICS_LAYER_TYPES,
+    analytics_features_qs,
+    analytics_layers_qs,
+    build_feature_coverage_stats,
+    build_layer_inventory,
+)
 from .mineral_coverage import (
     build_layers_boundary_coverage,
     build_mineral_boundary_coverage,
@@ -255,10 +258,7 @@ class HotspotAnalyticsView(APIView):
             return Response({"detail": "Subscription required."}, status=403)
 
         mineral_slug = request.query_params.get("mineral")
-        qs = MapFeature.objects.filter(
-            is_active=True,
-            layer__is_active=True,
-        ).select_related("layer", "layer__mineral", "layer__region")
+        qs = analytics_features_qs()
 
         if mineral_slug:
             qs = qs.filter(layer__mineral__slug=mineral_slug)
@@ -268,7 +268,7 @@ class HotspotAnalyticsView(APIView):
         coverage = build_feature_coverage_stats(qs, country_code=country_code, locale=locale)
 
         layer_stats = (
-            layers_with_mapped_data(MapLayer.objects.filter(is_active=True))
+            analytics_layers_qs()
             .values("layer_type")
             .annotate(count=Count("id"))
         )
@@ -298,8 +298,13 @@ class InvestorDashboardView(APIView):
             return Response({"detail": "Subscription required."}, status=403)
 
         locale = get_request_locale(request)
+        mineral_layer_filter = Q(
+            layers__is_active=True,
+            layers__layer_type__in=ANALYTICS_LAYER_TYPES,
+            layers__features__is_active=True,
+        )
         minerals = Mineral.objects.filter(is_active=True).annotate(
-            layer_count=Count("layers", filter=MAPPED_LAYER_COUNT_FILTER, distinct=True),
+            layer_count=Count("layers", filter=mineral_layer_filter, distinct=True),
             report_count=Count("reports"),
         )
         data = [

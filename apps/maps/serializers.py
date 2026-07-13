@@ -233,7 +233,36 @@ class MapLayerSerializer(serializers.ModelSerializer):
         )
         if not layer_type and self.instance:
             layer_type = self.instance.layer_type
-        return enrich_layer_style(value or {}, layer_type or "polygon")
+        layer_name = ""
+        preferred_hex = None
+        used_colors: list[str] = []
+        suggest_if_empty = not self.instance
+        if hasattr(self, "initial_data"):
+            layer_name = str(self.initial_data.get("name") or "")
+            mineral_id = self.initial_data.get("mineral")
+            if mineral_id:
+                from apps.minerals.models import Mineral
+
+                mineral = Mineral.objects.filter(pk=mineral_id).only("color").first()
+                if mineral and mineral.color:
+                    preferred_hex = mineral.color
+        if suggest_if_empty:
+            from apps.maps.models import MapLayer
+
+            for style in MapLayer.objects.filter(is_active=True).values_list("style", flat=True):
+                if not isinstance(style, dict):
+                    continue
+                fill = style.get("fill") or style.get("stroke")
+                if isinstance(fill, str) and fill.strip():
+                    used_colors.append(fill)
+        return enrich_layer_style(
+            value or {},
+            layer_type or "polygon",
+            layer_name=layer_name,
+            preferred_hex=preferred_hex,
+            used_colors=used_colors,
+            suggest_if_empty=suggest_if_empty,
+        )
 
     def validate_buffer_km(self, value):
         if value is None:
@@ -254,6 +283,27 @@ class MapLayerSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
+        style = validated_data.get("style") or {}
+        if not style.get("fill") and not style.get("stroke"):
+            from apps.maps.models import MapLayer
+            from apps.minerals.color_utils import enrich_layer_style
+
+            used_colors = []
+            for existing in MapLayer.objects.filter(is_active=True).values_list("style", flat=True):
+                if isinstance(existing, dict):
+                    fill = existing.get("fill") or existing.get("stroke")
+                    if isinstance(fill, str) and fill.strip():
+                        used_colors.append(fill)
+            mineral = validated_data.get("mineral")
+            preferred = getattr(mineral, "color", None) if mineral else None
+            validated_data["style"] = enrich_layer_style(
+                {},
+                validated_data.get("layer_type") or "polygon",
+                layer_name=validated_data.get("name") or "",
+                preferred_hex=preferred,
+                used_colors=used_colors,
+                suggest_if_empty=True,
+            )
         layer = super().create(validated_data)
         self._sync_mineral_color(layer)
         return layer

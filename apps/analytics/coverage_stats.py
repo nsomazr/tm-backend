@@ -19,6 +19,27 @@ from .spatial_assign import AdminBoundaryIndex, feature_sample_point, layer_disp
 
 _ACTIVE_FEATURE = Q(features__is_active=True)
 
+# Analytics tracks mineral coverage only (polygons + points). Structure lines stay on the map/heatmap.
+ANALYTICS_LAYER_TYPES = (MapLayer.LayerType.POLYGON, MapLayer.LayerType.POINT)
+
+
+def analytics_features_qs(features_qs=None):
+    """Active features on polygon/point layers (excludes structure lines)."""
+    qs = features_qs if features_qs is not None else MapFeature.objects.all()
+    return qs.filter(
+        is_active=True,
+        layer__is_active=True,
+        layer__layer_type__in=ANALYTICS_LAYER_TYPES,
+    )
+
+
+def analytics_layers_qs(layers_qs=None):
+    """Active polygon/point layers with mapped data (excludes structure lines)."""
+    qs = layers_qs if layers_qs is not None else MapLayer.objects.all()
+    return layers_with_mapped_data(
+        qs.filter(is_active=True, layer_type__in=ANALYTICS_LAYER_TYPES)
+    )
+
 
 def _feature_sample_point(feature: MapFeature) -> tuple[float, float]:
     return feature_sample_point(feature)
@@ -41,7 +62,7 @@ def _feature_polygon_area_km2(feature: MapFeature) -> float:
 def _mineral_hotspot_group_key(row: dict[str, Any]) -> str:
     """Group key for mineral-level hotspot rows.
 
-    Dedicated minerals merge polygon/point/line layers. Layers still on the shared
+    Dedicated minerals merge polygon/point layers. Layers still on the shared
     ``general`` mineral stay separate (layer slug) so each upload appears in selectors.
     """
     mineral_slug = row.get("mineral_slug") or row["slug"]
@@ -51,7 +72,7 @@ def _mineral_hotspot_group_key(row: dict[str, Any]) -> str:
 
 
 def _aggregate_mineral_hotspots(layer_hotspots: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One row per commodity mineral (sum polygon/point/line layers for the same mineral)."""
+    """One row per commodity mineral (sum polygon/point layers for the same mineral)."""
     merged: dict[str, dict[str, Any]] = {}
     for row in layer_hotspots:
         mineral_slug = row.get("mineral_slug") or row["slug"]
@@ -131,6 +152,7 @@ def build_feature_coverage_stats(
     locale: str = "en",
     max_features: int | None = None,
 ) -> dict[str, Any]:
+    features_qs = analytics_features_qs(features_qs)
     region_index = _AdminRegionIndex(country_code)
     region_counts: defaultdict[str, int] = defaultdict(int)
     region_areas: defaultdict[str, float] = defaultdict(float)
@@ -269,7 +291,7 @@ def build_feature_coverage_stats(
 def build_layer_inventory(*, locale: str = "en") -> list[dict[str, Any]]:
     rows = []
     for layer in (
-        layers_with_mapped_data(MapLayer.objects.filter(is_active=True))
+        analytics_layers_qs()
         .select_related("mineral")
         .annotate(feature_count=Count("features", filter=_ACTIVE_FEATURE))
         .order_by("-feature_count", "name")

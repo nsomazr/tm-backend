@@ -5,6 +5,7 @@ from rest_framework import serializers
 from apps.maps.localization import get_request_locale, localized_name
 
 from .access import user_can_download_report, user_has_report_detail_access
+from .geometry import clamp_report_buffer_km, derive_center_and_bbox, normalize_report_geometry
 from .models import Report, ReportSummary, UserExplorationReport
 from .pdf_service import _html_to_report_text
 from .report_text_utils import filter_report_findings
@@ -166,6 +167,8 @@ class ReportSerializer(serializers.ModelSerializer):
             "center_lat",
             "center_lng",
             "zoom",
+            "geometry",
+            "buffer_km",
             "preview_image",
             "price",
             "currency",
@@ -302,6 +305,7 @@ class ReportAdminSerializer(serializers.ModelSerializer):
         write_only=True,
     )
     bounding_box = JSONDictField(required=False)
+    geometry = JSONDictField(required=False)
     linked_layers = serializers.SerializerMethodField()
     location_tags = serializers.SerializerMethodField()
     has_article = serializers.BooleanField(read_only=True)
@@ -324,6 +328,8 @@ class ReportAdminSerializer(serializers.ModelSerializer):
             "center_lat",
             "center_lng",
             "zoom",
+            "geometry",
+            "buffer_km",
             "article_body",
             "pdf_file",
             "has_pdf",
@@ -447,6 +453,42 @@ class ReportAdminSerializer(serializers.ModelSerializer):
 
         raise serializers.ValidationError("Upload a PDF or Word document (.docx).")
 
+    def validate_geometry(self, value):
+        try:
+            return normalize_report_geometry(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+    def validate_buffer_km(self, value):
+        if value in (None, "", []):
+            return None
+        try:
+            return clamp_report_buffer_km(value)
+        except (TypeError, ValueError) as exc:
+            raise serializers.ValidationError("buffer_km must be a number.") from exc
+
+    def _apply_geometry_derived_fields(self, validated_data):
+        geometry = validated_data.get("geometry", serializers.empty)
+        buffer_km = validated_data.get("buffer_km", serializers.empty)
+
+        if geometry is serializers.empty and buffer_km is serializers.empty:
+            return
+
+        if geometry is serializers.empty:
+            geometry = getattr(self.instance, "geometry", None) or {}
+        if buffer_km is serializers.empty:
+            buffer_km = getattr(self.instance, "buffer_km", None)
+
+        if not geometry:
+            return
+
+        center_lat, center_lng, bbox = derive_center_and_bbox(geometry, buffer_km)
+        if center_lat is not None:
+            validated_data.setdefault("center_lat", center_lat)
+            validated_data.setdefault("center_lng", center_lng)
+        if bbox and not validated_data.get("bounding_box"):
+            validated_data["bounding_box"] = bbox
+
     def _save_m2m(self, report, layer_ids, boundary_ids, allowed_plan_ids):
         if layer_ids is not None:
             report.layers.set(layer_ids)
@@ -478,6 +520,7 @@ class ReportAdminSerializer(serializers.ModelSerializer):
         boundary_ids = validated_data.pop("boundary_ids", None)
         allowed_plan_ids = validated_data.pop("allowed_plan_ids", None)
 
+        self._apply_geometry_derived_fields(validated_data)
         validated_data["slug"] = unique_report_slug(validated_data["title"])
 
         report = super().create(validated_data)
@@ -492,6 +535,7 @@ class ReportAdminSerializer(serializers.ModelSerializer):
         boundary_ids = validated_data.pop("boundary_ids", None)
         allowed_plan_ids = validated_data.pop("allowed_plan_ids", None)
 
+        self._apply_geometry_derived_fields(validated_data)
         report = super().update(instance, validated_data)
         self._save_m2m(report, layer_ids, boundary_ids, allowed_plan_ids)
 

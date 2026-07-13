@@ -67,6 +67,7 @@ INSTALLED_APPS = [
     "apps.analytics",
     "apps.compliance",
     "apps.ads",
+    "apps.marketplace",
 ]
 
 MIDDLEWARE = [
@@ -175,11 +176,17 @@ REST_FRAMEWORK = {
 MAP_PREVIEW_COORD_DECIMALS = int(os.getenv("MAP_PREVIEW_COORD_DECIMALS", "3"))
 
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(hours=1),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    # Access: short-lived bearer (common SaaS default).
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
+    # Absolute session cap (~workday / OWASP moderate absolute timeout).
+    "REFRESH_TOKEN_LIFETIME": timedelta(hours=8),
     "ROTATE_REFRESH_TOKENS": True,
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
+
+# Django admin / server session cookie (align with JWT absolute window).
+SESSION_COOKIE_AGE = int(os.getenv("SESSION_COOKIE_AGE", str(8 * 60 * 60)))
+SESSION_SAVE_EVERY_REQUEST = True
 
 CORS_ALLOWED_ORIGINS = _split_env_list("CORS_ALLOWED_ORIGINS", "http://localhost:3085")
 CORS_ALLOW_CREDENTIALS = True

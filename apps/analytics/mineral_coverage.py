@@ -170,6 +170,41 @@ def _feature_counts_by_layer(layer_ids: set[int]) -> dict[int, int]:
     return counts
 
 
+def _feature_counts_by_mineral_slug(*, country: Country, mapped_layer_ids: set[int]) -> dict[str, int]:
+    """Count mapped features for each commodity, including Link Layers associations."""
+    counts: dict[str, int] = {}
+    if not mapped_layer_ids:
+        return counts
+
+    for mineral_slug in (
+        MapFeature.objects.filter(is_active=True, layer_id__in=mapped_layer_ids)
+        .values_list("layer__mineral__slug", flat=True)
+    ):
+        if mineral_slug:
+            counts[mineral_slug] = counts.get(mineral_slug, 0) + 1
+
+    # Features on layers linked via Mineral.associated_layers also count toward that commodity.
+    for mineral in Mineral.objects.filter(is_active=True, country=country).prefetch_related(
+        "associated_layers"
+    ):
+        associated_ids = {
+            layer.id
+            for layer in mineral.associated_layers.all()
+            if layer.is_active and layer.id in mapped_layer_ids
+        }
+        if not associated_ids:
+            continue
+        extra = (
+            MapFeature.objects.filter(is_active=True, layer_id__in=associated_ids)
+            .exclude(layer__mineral__slug=mineral.slug)
+            .count()
+        )
+        if extra:
+            counts[mineral.slug] = counts.get(mineral.slug, 0) + extra
+
+    return counts
+
+
 def _layer_catalog_entry(
     layer: MapLayer,
     *,
@@ -235,13 +270,7 @@ def build_mineral_catalog(*, country_code: str = "TZ", user=None, locale: str = 
     entries_by_slug: dict[str, dict] = {}
 
     minerals = Mineral.objects.filter(is_active=True, country=country).order_by("name")
-    mineral_counts: dict[str, int] = {}
-    if mapped_layer_ids:
-        for mineral_slug in (
-            MapFeature.objects.filter(is_active=True, layer_id__in=mapped_layer_ids)
-            .values_list("layer__mineral__slug", flat=True)
-        ):
-            mineral_counts[mineral_slug] = mineral_counts.get(mineral_slug, 0) + 1
+    mineral_counts = _feature_counts_by_mineral_slug(country=country, mapped_layer_ids=mapped_layer_ids)
 
     for mineral in minerals:
         feature_count = mineral_counts.get(mineral.slug, 0)
