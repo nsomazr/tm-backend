@@ -77,10 +77,12 @@ def _prepare_geometry(geometry: dict, layer: MapLayer) -> dict:
 
 def import_features_for_layer(layer: MapLayer, features_data: list, source: str = "import") -> int:
     """Bulk-create parsed GeoJSON features on a layer. Returns count of new features."""
+    from apps.maps.structure_props import normalize_structure_properties
+
     new_features = []
     for feat in features_data:
         geom = _prepare_geometry(feat.get("geometry", {}), layer)
-        props = feat.get("properties", {}) or {}
+        props = normalize_structure_properties(feat.get("properties", {}) or {})
         lat, lng = _extract_point_coords(geom)
         new_features.append(
             MapFeature(

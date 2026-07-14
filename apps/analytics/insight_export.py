@@ -552,13 +552,22 @@ def _append_structured_overview(
                 name = mineral.get("name") or mineral.get("slug") or "Unknown"
                 count = int(mineral.get("count") or mineral.get("feature_count") or 0)
                 m_area = mineral.get("area_km2")
-                detail = f"{count:,} mapped area{'s' if count != 1 else ''}"
+                detail = f"{count:,} mapped feature{'s' if count != 1 else ''}"
+                occ = int(mineral.get("occurrence_count") or 0)
+                poly = int(mineral.get("polygon_count") or 0)
+                if occ or poly:
+                    parts = []
+                    if occ:
+                        parts.append(f"{occ:,} point occurrence{'s' if occ != 1 else ''}")
+                    if poly:
+                        parts.append(f"{poly:,} polygon area{'s' if poly != 1 else ''}")
+                    detail = ", ".join(parts)
                 if m_area:
                     detail += f", {float(m_area):,.2f} km²"
                 story.append(Paragraph(f"<b>{_inline_markdown_markup(str(name))}</b>", subsection_style))
                 story.append(
                     Paragraph(
-                        f"Mapped occurrence near {location}: {detail}. "
+                        f"Mapped evidence near {location}: {detail}. "
                         f"Follow up with license checks, geophysics/geochem, and field mapping.",
                         body_style,
                     )
@@ -701,6 +710,12 @@ def _append_location_analysis(
         story.append(Paragraph("Compass distribution", body_style))
         for line in direction_lines:
             story.append(Paragraph(_inline_markdown_markup(line), body_style))
+    structure = data.get("structure_orientations") or {}
+    structure_lines = structure.get("summary_lines") or []
+    if structure_lines:
+        story.append(Paragraph("Structural trends", body_style))
+        for line in structure_lines:
+            story.append(Paragraph(_inline_markdown_markup(line), body_style))
     refs = data.get("reference_buffers") or []
     if refs:
         story.append(Paragraph("Reference buffer context:", body_style))
@@ -762,15 +777,27 @@ def _append_geological_interpretation(
         count = int(mineral.get("count") or mineral.get("feature_count") or 0)
         m_area = mineral.get("area_km2")
         story.append(Paragraph(f"<b>{_inline_markdown_markup(str(name))}</b>", subsection_style))
-        detail = (
-            f"{count:,} mapped occurrence{'s' if count != 1 else ''} fall within the analysis scope"
-        )
+        occ = int(mineral.get("occurrence_count") or 0)
+        poly = int(mineral.get("polygon_count") or 0)
+        if occ or poly:
+            bits = []
+            if occ:
+                bits.append(
+                    f"{occ:,} point occurrence{'s' if occ != 1 else ''}"
+                )
+            if poly:
+                bits.append(f"{poly:,} polygon area{'s' if poly != 1 else ''}")
+            detail = " and ".join(bits) + " fall within the analysis scope"
+        else:
+            detail = (
+                f"{count:,} mapped feature{'s' if count != 1 else ''} fall within the analysis scope"
+            )
         if m_area:
             detail += f", covering roughly {float(m_area):,.2f} km² of mapped mineral area"
         detail += (
-            ". Interpret these as exploration indicators from published or platform-managed layers, "
-            "not as resource estimates. Structural controls, alteration, and host lithology should be "
-            "confirmed in the field."
+            ". Point occurrences are discrete mapped locations; polygon areas are exploration "
+            "indicators from published or platform-managed layers, not resource estimates. "
+            "Structural controls, alteration, and host lithology should be confirmed in the field."
         )
         story.append(Paragraph(detail + ".", body_style))
     story.append(Spacer(1, 0.08 * inch))
@@ -1120,6 +1147,7 @@ def _gather_map_export_data(
         "top_regions": ctx.get("top_regions") or [],
         "reference_buffers": ctx.get("reference_buffers") or [],
         "direction_insights": ctx.get("direction_insights"),
+        "structure_orientations": ctx.get("structure_orientations"),
         "geological_context": ctx.get("geological_context"),
         "site_assessment": (
             generate_basic_map_insight(ctx, locale=locale)

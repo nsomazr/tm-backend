@@ -158,6 +158,32 @@ def layer_display_color(layer) -> str:
     return style.get("fill") or layer.mineral.color or "#0d9488"
 
 
+def is_point_feature(feature: MapFeature) -> bool:
+    """True when the feature is a mapped point occurrence (not a polygon area)."""
+    layer = getattr(feature, "layer", None)
+    if layer is not None and layer.layer_type == MapLayer.LayerType.POINT:
+        return True
+    geometry = feature.geometry if isinstance(feature.geometry, dict) else {}
+    return geometry.get("type") in ("Point", "MultiPoint")
+
+
+def is_polygon_feature(feature: MapFeature) -> bool:
+    layer = getattr(feature, "layer", None)
+    if layer is not None and layer.layer_type == MapLayer.LayerType.POLYGON:
+        return True
+    geometry = feature.geometry if isinstance(feature.geometry, dict) else {}
+    return geometry.get("type") in ("Polygon", "MultiPolygon")
+
+
+def is_line_feature(feature: MapFeature) -> bool:
+    """True when the feature is a mapped structure line (not a point or polygon area)."""
+    layer = getattr(feature, "layer", None)
+    if layer is not None and layer.layer_type == MapLayer.LayerType.LINE:
+        return True
+    geometry = feature.geometry if isinstance(feature.geometry, dict) else {}
+    return geometry.get("type") in ("LineString", "MultiLineString")
+
+
 def commodities_from_features(
     features: list[MapFeature],
     locale: str = "en",
@@ -176,14 +202,25 @@ def commodities_from_features(
                 "name": localized_name(layer, locale),
                 "name_sw": layer.name_sw or "",
                 "color": layer_display_color(layer),
+                # Total mapped features (points + polygons + lines) for list UIs.
                 "count": 0,
+                # Occurrences = point features only (insights / reporting).
+                "occurrence_count": 0,
+                "polygon_count": 0,
+                "line_count": 0,
             }
             if include_polygon_area:
                 entry["area_km2"] = 0.0
             counts[layer.id] = entry
         counts[layer.id]["count"] += 1
-        if include_polygon_area and layer.layer_type == MapLayer.LayerType.POLYGON:
-            counts[layer.id]["area_km2"] += geometry_area_km2(feature.geometry)
+        if is_point_feature(feature):
+            counts[layer.id]["occurrence_count"] += 1
+        elif is_polygon_feature(feature):
+            counts[layer.id]["polygon_count"] += 1
+            if include_polygon_area:
+                counts[layer.id]["area_km2"] += geometry_area_km2(feature.geometry)
+        elif is_line_feature(feature):
+            counts[layer.id]["line_count"] += 1
 
     rows: list[dict[str, Any]] = []
     for row in counts.values():

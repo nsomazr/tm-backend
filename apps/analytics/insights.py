@@ -15,9 +15,12 @@ from apps.maps.geometry_utils import (
     feature_contains_click,
     geometry_area_km2,
     geometry_bbox,
+    geometry_line_trend_degrees,
+    undirected_trend_degrees,
 )
 from apps.maps.localization import localized_name
 from apps.maps.models import MapFeature, MapLayer
+from apps.maps.structure_props import extract_orientation_degrees
 from apps.minerals.models import Mineral
 
 from .map_view_area import analysis_zone_deltas_degrees, included_analysis_km2
@@ -28,6 +31,9 @@ from .spatial_assign import (
     feature_sample_point,
     features_in_boundary,
     features_in_exploration_scope,
+    is_line_feature,
+    is_point_feature,
+    is_polygon_feature,
 )
 
 
@@ -1124,6 +1130,253 @@ def direction_insights_for_features(
     }
 
 
+_STRUCTURE_TREND_RANGES = (
+    ("N-S", 0.0, 22.5, 157.5, 180.0),
+    ("NE-SW", 22.5, 67.5, None, None),
+    ("E-W", 67.5, 112.5, None, None),
+    ("NW-SE", 112.5, 157.5, None, None),
+)
+
+_STRUCTURE_TREND_ORDER = ("N-S", "NE-SW", "E-W", "NW-SE")
+
+_PRIORITY_ORIENTATION_KEYS = frozenset(
+    {
+        "trend_deg",
+        "strike_0_180",
+        "strike_deg",
+        "strike",
+        "trend",
+        "azimuth",
+        "azimuth_deg",
+        "bearing",
+        "bearing_deg",
+        "structure_type",
+        "structure_rank",
+        "structurerank",
+    }
+)
+
+
+def _undirected_trend_bin(trend_0_180: float) -> str:
+    t = float(trend_0_180) % 180.0
+    for label, start, end, start2, end2 in _STRUCTURE_TREND_RANGES:
+        if start2 is not None and end2 is not None:
+            if start <= t < end or start2 <= t < end2:
+                return label
+        elif start <= t < end:
+            return label
+    return "N-S"
+
+
+def _trend_bin_label(bin_key: str, locale: str = "en") -> str:
+    if locale == "sw":
+        labels = {
+            "N-S": "K–S",
+            "NE-SW": "KM–SM",
+            "E-W": "M–M",
+            "NW-SE": "KM–SK",
+        }
+        return labels.get(bin_key, bin_key)
+    return bin_key.replace("-", "–")
+
+
+def _feature_orientation_degrees(feature: MapFeature) -> tuple[float, str] | None:
+    """
+    Return (undirected 0–180 trend, source) from attributes or line geometry.
+    Attribute values win over geometry-derived bearings.
+    """
+    props = feature.properties if isinstance(feature.properties, dict) else {}
+    from_props = extract_orientation_degrees(props)
+    if from_props is not None:
+        return undirected_trend_degrees(from_props), "property"
+
+    if is_line_feature(feature):
+        from_geom = geometry_line_trend_degrees(
+            feature.geometry if isinstance(feature.geometry, dict) else None
+        )
+        if from_geom is not None:
+            return from_geom, "geometry"
+    return None
+
+
+def _structure_orientation_summary_lines(
+    overall: dict[str, int],
+    by_mineral: list[dict],
+    *,
+    dominant_trend: str | None,
+    mean_trend_deg: float | None,
+    count_with_orientation: int,
+    property_count: int,
+    geometry_count: int,
+    locale: str = "en",
+) -> list[str]:
+    lines: list[str] = []
+    if count_with_orientation < 1 or not dominant_trend:
+        return lines
+
+    trend_label = _trend_bin_label(dominant_trend, locale)
+    dominant_count = int(overall.get(dominant_trend, 0) or 0)
+    mean_bit = ""
+    if mean_trend_deg is not None:
+        mean_bit = (
+            f" (wastani wa mwelekeo {mean_trend_deg:.0f}°)"
+            if locale == "sw"
+            else f" (mean trend {mean_trend_deg:.0f}°)"
+        )
+
+    if locale == "sw":
+        lines.append(
+            f"Miundo {count_with_orientation} yenye mwelekeo: "
+            f"mtindo mkuu **{trend_label}** ({dominant_count} kati ya {count_with_orientation})"
+            f"{mean_bit}."
+        )
+        source_bits = []
+        if property_count:
+            source_bits.append(f"{property_count} kutoka sifa")
+        if geometry_count:
+            source_bits.append(f"{geometry_count} kutoka jiometri ya mistari")
+        if source_bits:
+            lines.append(f"Chanzo: {', '.join(source_bits)}.")
+    else:
+        lines.append(
+            f"{count_with_orientation} mapped structure"
+            f"{'s' if count_with_orientation != 1 else ''} with orientation: "
+            f"dominant trend **{trend_label}** ({dominant_count} of {count_with_orientation})"
+            f"{mean_bit}."
+        )
+        source_bits = []
+        if property_count:
+            source_bits.append(f"{property_count} from attributes")
+        if geometry_count:
+            source_bits.append(f"{geometry_count} from line geometry")
+        if source_bits:
+            lines.append(f"Source: {', '.join(source_bits)}.")
+
+    for entry in by_mineral[:3]:
+        if int(entry.get("count") or 0) < 2:
+            continue
+        name = entry.get("name") or entry.get("slug") or "Layer"
+        d_label = _trend_bin_label(str(entry.get("dominant_trend") or ""), locale)
+        if locale == "sw":
+            lines.append(
+                f"**{name}**: mtindo mkuu {d_label} "
+                f"({entry.get('dominant_count')} kati ya {entry.get('count')})."
+            )
+        else:
+            lines.append(
+                f"**{name}**: dominant {d_label} "
+                f"({entry.get('dominant_count')} of {entry.get('count')})."
+            )
+    return lines
+
+
+def structure_orientation_insights_for_features(
+    features: list[MapFeature],
+    minerals_list: list[dict],
+    *,
+    locale: str = "en",
+) -> dict | None:
+    """
+    Geological fabric trends (strike/trend), distinct from compass clustering vs center.
+    Prefers property strike/trend/azimuth; falls back to line-geometry bearings.
+    """
+    if not features:
+        return None
+
+    overall: dict[str, int] = defaultdict(int)
+    by_slug: dict[str, dict] = {}
+    trends: list[float] = []
+    property_count = 0
+    geometry_count = 0
+
+    for feature in features:
+        oriented = _feature_orientation_degrees(feature)
+        if oriented is None:
+            # Include bare line features in line_count stats only via commodities;
+            # skip orientation when neither attribute nor computable geometry exists.
+            continue
+        trend, source = oriented
+        bin_key = _undirected_trend_bin(trend)
+        overall[bin_key] += 1
+        trends.append(trend)
+        if source == "property":
+            property_count += 1
+        else:
+            geometry_count += 1
+
+        mineral = feature.layer.mineral if feature.layer else None
+        slug = mineral.slug if mineral else (feature.layer.slug if feature.layer else "unknown")
+        name = localized_name(mineral, locale) if mineral else (
+            localized_name(feature.layer, locale) if feature.layer else "Unknown"
+        )
+        if slug not in by_slug:
+            by_slug[slug] = {"name": name, "bins": defaultdict(int)}
+        by_slug[slug]["bins"][bin_key] += 1
+
+    if not overall:
+        return None
+
+    # Circular mean of undirected trends (double-angle).
+    sum_sin = sum(math.sin(math.radians(t * 2.0)) for t in trends)
+    sum_cos = sum(math.cos(math.radians(t * 2.0)) for t in trends)
+    mean_trend_deg = None
+    if abs(sum_sin) > 1e-15 or abs(sum_cos) > 1e-15:
+        mean_trend_deg = round(
+            undirected_trend_degrees(math.degrees(0.5 * math.atan2(sum_sin, sum_cos))),
+            1,
+        )
+
+    dominant_trend, _ = max(overall.items(), key=lambda item: item[1])
+
+    by_mineral: list[dict] = []
+    mineral_order = {m.get("slug"): idx for idx, m in enumerate(minerals_list)}
+    for slug, payload in sorted(
+        by_slug.items(),
+        key=lambda item: (mineral_order.get(item[0], 999), -sum(item[1]["bins"].values())),
+    ):
+        bins = {key: int(value) for key, value in payload["bins"].items()}
+        total = sum(bins.values())
+        if total < 1:
+            continue
+        d_bin, d_count = max(bins.items(), key=lambda item: item[1])
+        mineral_meta = next((m for m in minerals_list if m.get("slug") == slug), {})
+        by_mineral.append(
+            {
+                "slug": slug,
+                "name": mineral_meta.get("name") or payload["name"],
+                "count": total,
+                "bins": bins,
+                "dominant_trend": d_bin,
+                "dominant_trend_label": _trend_bin_label(d_bin, locale),
+                "dominant_count": d_count,
+            }
+        )
+
+    count_with_orientation = sum(overall.values())
+    summary_lines = _structure_orientation_summary_lines(
+        overall,
+        by_mineral,
+        dominant_trend=dominant_trend,
+        mean_trend_deg=mean_trend_deg,
+        count_with_orientation=count_with_orientation,
+        property_count=property_count,
+        geometry_count=geometry_count,
+        locale=locale,
+    )
+
+    return {
+        "dominant_trend": dominant_trend,
+        "dominant_trend_label": _trend_bin_label(dominant_trend, locale),
+        "mean_trend_deg": mean_trend_deg,
+        "count_with_orientation": count_with_orientation,
+        "property_count": property_count,
+        "geometry_count": geometry_count,
+        "bins": dict(overall),
+        "by_mineral": by_mineral,
+        "summary_lines": summary_lines,
+    }
+
+
 def _feature_region_name(feature: MapFeature, lat: float, lng: float) -> str | None:
     props = feature.properties or {}
     prop_region = props.get("region")
@@ -1151,21 +1404,39 @@ _SKIP_PROPERTY_KEYS = {
 def _serialize_feature_properties(props: dict | None, *, max_keys: int = 12) -> dict[str, str]:
     if not isinstance(props, dict) or not props:
         return {}
-    out: dict[str, str] = {}
-    for key, value in props.items():
-        if len(out) >= max_keys:
-            break
+
+    def _storable_item(key: str, value) -> tuple[str, str] | None:
         key_l = str(key).strip().lower()
         if not key_l or key_l in _SKIP_PROPERTY_KEYS:
-            continue
+            return None
         if value is None or value == "":
-            continue
+            return None
         if isinstance(value, (dict, list)):
-            continue
+            return None
         text = str(value).strip()
         if not text or len(text) > 160:
+            return None
+        return str(key), text
+
+    prioritized: list[tuple[str, str]] = []
+    rest: list[tuple[str, str]] = []
+    for key, value in props.items():
+        item = _storable_item(key, value)
+        if not item:
             continue
-        out[str(key)] = text
+        key_l = str(key).strip().lower().replace(" ", "_")
+        if key_l in _PRIORITY_ORIENTATION_KEYS or key_l.replace("_", "") in {
+            k.replace("_", "") for k in _PRIORITY_ORIENTATION_KEYS
+        }:
+            prioritized.append(item)
+        else:
+            rest.append(item)
+
+    out: dict[str, str] = {}
+    for key, text in prioritized + rest:
+        if len(out) >= max_keys:
+            break
+        out[key] = text
     return out
 
 
@@ -1572,6 +1843,11 @@ def area_location_context(
         minerals_list,
         locale=locale,
     )
+    structure_orientations = structure_orientation_insights_for_features(
+        matched,
+        minerals_list,
+        locale=locale,
+    )
 
     result = {
         "lat": lat,
@@ -1585,6 +1861,9 @@ def area_location_context(
         "village_boundary": village_info,
         "minerals": minerals_list,
         "feature_count": len(matched),
+        "occurrence_count": sum(1 for feature in matched if is_point_feature(feature)),
+        "polygon_count": sum(1 for feature in matched if is_polygon_feature(feature)),
+        "line_count": sum(1 for feature in matched if is_line_feature(feature)),
         "labels": labels[:8],
         "has_mapped_data": len(matched) > 0,
         "analysis_area_km2": zone_km2,
@@ -1593,6 +1872,7 @@ def area_location_context(
         "top_regions": top_regions,
         "exploration_geometry": exploration_geometry,
         "direction_insights": direction_insights,
+        "structure_orientations": structure_orientations,
         "feature_attributes": _feature_attribute_samples(matched),
         "layer_notes": [
             {
@@ -1647,7 +1927,22 @@ def enrich_area_insight_context(
 
 
 def _commodity_summary_line(commodity: dict) -> str:
-    line = f"{commodity['name']} ({commodity['count']} areas"
+    occurrences = int(commodity.get("occurrence_count") or 0)
+    polygons = int(commodity.get("polygon_count") or 0)
+    lines = int(commodity.get("line_count") or 0)
+    parts: list[str] = []
+    if occurrences:
+        parts.append(
+            f"{occurrences} occurrence{'s' if occurrences != 1 else ''} (points)"
+        )
+    if polygons:
+        parts.append(f"{polygons} polygon area{'s' if polygons != 1 else ''}")
+    if lines:
+        parts.append(f"{lines} structure line{'s' if lines != 1 else ''}")
+    if not parts:
+        total = int(commodity.get("count") or 0)
+        parts.append(f"{total} mapped feature{'s' if total != 1 else ''}")
+    line = f"{commodity['name']} ({', '.join(parts)}"
     area = commodity.get("area_km2")
     if area:
         line += f", {area:.2f} km² mineral area"
@@ -1741,7 +2036,44 @@ def build_area_ai_context(ctx: dict) -> str:
         for line in direction.get("summary_lines") or []:
             direction_block += f"- {line}\n"
         direction_block += (
-            "Describe spatial clustering using these compass directions when relevant.\n"
+            "Describe spatial clustering using these compass directions when relevant. "
+            "This is where mapped features lie relative to the analysis center — "
+            "not geological strike/trend of structure lines.\n"
+        )
+    structure = ctx.get("structure_orientations") or {}
+    structure_block = ""
+    if structure.get("count_with_orientation"):
+        structure_block = (
+            "Mapped structure orientations (geological trend/strike fabric, "
+            "NOT compass clustering from the analysis center):\n"
+            f"- overall dominant trend: {structure.get('dominant_trend_label')} "
+            f"({structure.get('count_with_orientation')} oriented features"
+        )
+        if structure.get("mean_trend_deg") is not None:
+            structure_block += f"; mean trend {structure['mean_trend_deg']:.0f}°"
+        structure_block += ")\n"
+        bin_bits = ", ".join(
+            f"{_trend_bin_label(bin_key)}={structure['bins'].get(bin_key, 0)}"
+            for bin_key in _STRUCTURE_TREND_ORDER
+            if structure.get("bins", {}).get(bin_key)
+        )
+        if bin_bits:
+            structure_block += f"- trend bins: {bin_bits}\n"
+        if structure.get("property_count") or structure.get("geometry_count"):
+            structure_block += (
+                f"- sources: {int(structure.get('property_count') or 0)} attribute, "
+                f"{int(structure.get('geometry_count') or 0)} line geometry\n"
+            )
+        for entry in structure.get("by_mineral") or []:
+            structure_block += (
+                f"- {entry.get('name')}: dominant {entry.get('dominant_trend_label')} "
+                f"({entry.get('dominant_count')} of {entry.get('count')})\n"
+            )
+        for line in structure.get("summary_lines") or []:
+            structure_block += f"- {line}\n"
+        structure_block += (
+            "Use these only as mapped structural fabric. Do not invent fold axes, "
+            "fault kinematics, or dip directions beyond the provided data.\n"
         )
     geology_block = ""
     geology = ctx.get("geological_context") or {}
@@ -1768,13 +2100,20 @@ def build_area_ai_context(ctx: dict) -> str:
         f"{basemap_block}"
         f"{terrain_block}"
         f"{direction_block}"
+        f"{structure_block}"
         f"{geology_block}"
         f"{layer_notes_block}"
         f"{attribute_block}"
         f"Administrative region at click: {geo}\n"
         f"Mapped area region (from feature data): {region}\n"
         f"Minerals in this analysis area (mapped data only): {mineral_lines}\n"
-        f"Mapped area count in this analysis area: {ctx['feature_count']}\n"
+        f"Point occurrences in this analysis area: {int(ctx.get('occurrence_count') or 0)}\n"
+        f"Polygon mineral areas in this analysis area: {int(ctx.get('polygon_count') or 0)}\n"
+        f"Structure lines in this analysis area: {int(ctx.get('line_count') or 0)}\n"
+        f"Total mapped features in this analysis area: {ctx['feature_count']}\n"
+        f"Terminology: 'occurrence' means a mapped point feature only; "
+        f"polygon features are mineral areas/coverage, not occurrences; "
+        f"structure orientations are geological trends of mapped lines/attributes.\n"
         f"Area labels: {labels}\n"
         f"Country: Tanzania\n"
         f"Important: Only describe the location, minerals, layer descriptions, and feature "
@@ -1958,27 +2297,58 @@ def generate_basic_map_insight(ctx: dict, locale: str = "en") -> str:
 
         coverage = (
             f"Data iliyopangwa inaonyesha **{feature_count}** "
-            f"{'eneo la uchunguzi' if feature_count == 1 else 'maeneo ya uchunguzi'} ndani ya upeo huu"
+            f"{'kipengele' if feature_count == 1 else 'vipengele'} ndani ya upeo huu"
         )
+        occurrence_count = int(ctx.get("occurrence_count") or 0)
+        polygon_count = int(ctx.get("polygon_count") or 0)
+        if occurrence_count or polygon_count:
+            coverage += (
+                f" ({occurrence_count} "
+                f"{'tukio la nukta' if occurrence_count == 1 else 'matukio ya nukta'}, "
+                f"{polygon_count} "
+                f"{'eneo la poligoni' if polygon_count == 1 else 'maeneo ya poligoni'})"
+            )
         if len(minerals) == 1:
             m = minerals[0]
             mname = m.get("name") or m.get("slug") or "Madini"
-            mcount = int(m.get("count") or 0)
-            coverage += f", likiwa na **{mname}** kama bidhaa kuu ({mcount} eneo"
-            if m.get("area_km2"):
-                coverage += f", **{float(m['area_km2']):,.2f} km²** ya poligoni iliyopangwa"
-            coverage += "). Poligoni hizi ni viashiria vya uwezekano, si makadirio ya akiba."
+            m_occ = int(m.get("occurrence_count") or 0)
+            m_poly = int(m.get("polygon_count") or 0)
+            coverage += f", likiwa na **{mname}** kama bidhaa kuu"
+            bits = []
+            if m_occ:
+                bits.append(f"{m_occ} {'tukio' if m_occ == 1 else 'matukio'} (nukta)")
+            if m_poly:
+                bits.append(f"{m_poly} {'poligoni' if m_poly == 1 else 'poligoni'}")
+            if bits:
+                coverage += f" ({', '.join(bits)}"
+                if m.get("area_km2"):
+                    coverage += f", **{float(m['area_km2']):,.2f} km²** ya poligoni iliyopangwa"
+                coverage += ")"
+            elif m.get("area_km2"):
+                coverage += f" (**{float(m['area_km2']):,.2f} km²** ya poligoni iliyopangwa)"
+            coverage += "). Matukio ni alama za nukta; poligoni ni maeneo ya uwezekano, si makadirio ya akiba."
         else:
             coverage += f", na **{len(minerals)}** aina za madini zilizotambuliwa."
-            coverage += " Poligoni zinaonyesha uwezekano wa uchunguzi, si makadirio ya rasilimali."
+            coverage += (
+                " Matukio (occurrences) ni alama za nukta pekee; poligoni zinaonyesha maeneo ya uchunguzi, "
+                "si makadirio ya rasilimali."
+            )
         paragraphs.append(coverage + ".")
 
         if minerals:
             commodity_bits = []
             for m in minerals[:4]:
                 mname = m.get("name") or m.get("slug") or "Madini"
-                mcount = int(m.get("count") or 0)
-                bit = f"**{mname}** ({mcount} eneo"
+                m_occ = int(m.get("occurrence_count") or 0)
+                m_poly = int(m.get("polygon_count") or 0)
+                detail_bits = []
+                if m_occ:
+                    detail_bits.append(f"{m_occ} {'tukio' if m_occ == 1 else 'matukio'}")
+                if m_poly:
+                    detail_bits.append(f"{m_poly} poligoni")
+                if not detail_bits:
+                    detail_bits.append(f"{int(m.get('count') or 0)} kipengele")
+                bit = f"**{mname}** ({', '.join(detail_bits)}"
                 if m.get("area_km2"):
                     bit += f", {float(m['area_km2']):,.2f} km²"
                 bit += f"): {_mineral_exploration_notes(m.get('slug', ''), mname, locale)}"
@@ -1992,6 +2362,9 @@ def generate_basic_map_insight(ctx: dict, locale: str = "en") -> str:
             )
 
         for line in (ctx.get("direction_insights") or {}).get("summary_lines") or []:
+            paragraphs.append(line)
+
+        for line in (ctx.get("structure_orientations") or {}).get("summary_lines") or []:
             paragraphs.append(line)
 
         for line in (ctx.get("terrain_context") or {}).get("summary_lines") or []:
@@ -2020,25 +2393,43 @@ def generate_basic_map_insight(ctx: dict, locale: str = "en") -> str:
         if admin_lines:
             paragraphs.append(admin_lines)
 
+        occurrence_count = int(ctx.get("occurrence_count") or 0)
+        polygon_count = int(ctx.get("polygon_count") or 0)
+
         if feature_count == 1 and len(minerals) == 1:
             m = minerals[0]
             mname = m.get("name") or m.get("slug") or "Unknown"
-            mcount = int(m.get("count") or 0)
-            coverage = (
-                f"Terra Meta maps **{mcount}** prospect area for **{mname}** in this scope"
-            )
+            m_occ = int(m.get("occurrence_count") or 0)
+            m_poly = int(m.get("polygon_count") or 0)
+            if m_occ and not m_poly:
+                coverage = (
+                    f"Terra Meta maps **{m_occ}** point occurrence for **{mname}** in this scope"
+                )
+            elif m_poly and not m_occ:
+                coverage = (
+                    f"Terra Meta maps **{m_poly}** mineral polygon area for **{mname}** in this scope"
+                )
+            else:
+                coverage = (
+                    f"Terra Meta maps **{mname}** in this scope "
+                    f"({m_occ} point occurrence{'s' if m_occ != 1 else ''}, "
+                    f"{m_poly} polygon area{'s' if m_poly != 1 else ''})"
+                )
             if m.get("area_km2"):
                 coverage += f", with **{float(m['area_km2']):,.2f} km²** of mapped mineral coverage"
             coverage += (
-                ". The mineral area outlines an exploration target from published platform layers — "
-                "it is not a resource estimate and must be validated with field geology, sampling, "
-                "and geophysics."
+                ". Point occurrences are discrete mapped locations; polygon areas outline exploration "
+                "targets from published platform layers — neither is a resource estimate and both must "
+                "be validated with field geology, sampling, and geophysics."
             )
         else:
             coverage = (
-                f"The mapped dataset records **{feature_count}** prospect areas spanning "
-                f"**{len(minerals)}** commodities in this area. Mineral areas represent exploration "
-                "indicators from curated layers, not JORC/NI 43-101 resources."
+                f"The mapped dataset records **{occurrence_count}** point occurrence"
+                f"{'' if occurrence_count == 1 else 's'} and **{polygon_count}** polygon mineral area"
+                f"{'' if polygon_count == 1 else 's'} "
+                f"across **{len(minerals)}** commodities in this area. "
+                "Use **occurrence** only for point features; polygon features are mineral areas, "
+                "not occurrences. These are exploration indicators from curated layers, not JORC/NI 43-101 resources."
             )
         paragraphs.append(coverage)
 
@@ -2046,8 +2437,21 @@ def generate_basic_map_insight(ctx: dict, locale: str = "en") -> str:
             geo_bits = []
             for m in minerals[:4]:
                 mname = m.get("name") or m.get("slug") or "Unknown"
-                mcount = int(m.get("count") or 0)
-                lead = f"**{mname}** ({mcount} area{'s' if mcount != 1 else ''}"
+                m_occ = int(m.get("occurrence_count") or 0)
+                m_poly = int(m.get("polygon_count") or 0)
+                detail_bits = []
+                if m_occ:
+                    detail_bits.append(
+                        f"{m_occ} occurrence{'s' if m_occ != 1 else ''}"
+                    )
+                if m_poly:
+                    detail_bits.append(
+                        f"{m_poly} polygon area{'s' if m_poly != 1 else ''}"
+                    )
+                if not detail_bits:
+                    total = int(m.get("count") or 0)
+                    detail_bits.append(f"{total} feature{'s' if total != 1 else ''}")
+                lead = f"**{mname}** ({', '.join(detail_bits)}"
                 if m.get("area_km2"):
                     lead += f", {float(m['area_km2']):,.2f} km² mapped"
                 lead += f"): {_mineral_exploration_notes(m.get('slug', ''), mname, locale)}"
@@ -2061,6 +2465,9 @@ def generate_basic_map_insight(ctx: dict, locale: str = "en") -> str:
             )
 
         for line in (ctx.get("direction_insights") or {}).get("summary_lines") or []:
+            paragraphs.append(line)
+
+        for line in (ctx.get("structure_orientations") or {}).get("summary_lines") or []:
             paragraphs.append(line)
 
         for line in (ctx.get("terrain_context") or {}).get("summary_lines") or []:

@@ -264,3 +264,96 @@ def distance_geometry_to_point_km(
         )
 
     return float("inf")
+
+
+def geographic_bearing_degrees(
+    lat1: float,
+    lng1: float,
+    lat2: float,
+    lng2: float,
+) -> float:
+    """Forward azimuth from point 1 → point 2 in degrees clockwise from north (0–360)."""
+    phi1 = math.radians(float(lat1))
+    phi2 = math.radians(float(lat2))
+    d_lambda = math.radians(float(lng2) - float(lng1))
+    x = math.sin(d_lambda) * math.cos(phi2)
+    y = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(d_lambda)
+    return (math.degrees(math.atan2(x, y)) + 360.0) % 360.0
+
+
+def undirected_trend_degrees(bearing_0_360: float) -> float:
+    """Fold a directed azimuth into an undirected geologic trend (0–180)."""
+    return float(bearing_0_360) % 180.0
+
+
+def _linestring_length_weighted_trend(coords: list[list[float]]) -> float | None:
+    """Length-weighted circular mean of undirected segment trends for a LineString."""
+    if not coords or len(coords) < 2:
+        return None
+
+    sum_sin = 0.0
+    sum_cos = 0.0
+    total_weight = 0.0
+
+    for i in range(len(coords) - 1):
+        alng, alat = float(coords[i][0]), float(coords[i][1])
+        blng, blat = float(coords[i + 1][0]), float(coords[i + 1][1])
+        weight = haversine_km(alat, alng, blat, blng)
+        if weight <= 0:
+            continue
+        bearing = geographic_bearing_degrees(alat, alng, blat, blng)
+        undirected = undirected_trend_degrees(bearing)
+        # Double-angle average for axial (period-180°) data.
+        angle = math.radians(undirected * 2.0)
+        sum_sin += weight * math.sin(angle)
+        sum_cos += weight * math.cos(angle)
+        total_weight += weight
+
+    if total_weight <= 0 or (abs(sum_sin) < 1e-15 and abs(sum_cos) < 1e-15):
+        return None
+    return undirected_trend_degrees(math.degrees(0.5 * math.atan2(sum_sin, sum_cos)))
+
+
+def geometry_line_trend_degrees(geometry: dict[str, Any] | None) -> float | None:
+    """
+    Undirected trend (0–180°) from LineString / MultiLineString geometry.
+    MultiLineString uses a length-weighted mean of part trends.
+    """
+    if not geometry or "type" not in geometry:
+        return None
+
+    gtype = geometry["type"]
+    coords = geometry.get("coordinates")
+    if not coords:
+        return None
+
+    if gtype == "LineString":
+        return _linestring_length_weighted_trend(coords)
+
+    if gtype == "MultiLineString":
+        sum_sin = 0.0
+        sum_cos = 0.0
+        total_weight = 0.0
+        for line in coords:
+            trend = _linestring_length_weighted_trend(line)
+            if trend is None or len(line) < 2:
+                continue
+            weight = 0.0
+            for i in range(len(line) - 1):
+                weight += haversine_km(
+                    float(line[i][1]),
+                    float(line[i][0]),
+                    float(line[i + 1][1]),
+                    float(line[i + 1][0]),
+                )
+            if weight <= 0:
+                continue
+            angle = math.radians(trend * 2.0)
+            sum_sin += weight * math.sin(angle)
+            sum_cos += weight * math.cos(angle)
+            total_weight += weight
+        if total_weight <= 0 or (abs(sum_sin) < 1e-15 and abs(sum_cos) < 1e-15):
+            return None
+        return undirected_trend_degrees(math.degrees(0.5 * math.atan2(sum_sin, sum_cos)))
+
+    return None
