@@ -8,6 +8,13 @@ logger = logging.getLogger(__name__)
 
 MAX_WEB_CONTEXT_CHARS = 6000
 REFERENCES_HEADING = "References and Sources"
+_HTML_REFERENCES_TAIL_RE = re.compile(
+    r"(?is)<h[23][^>]*>\s*References(?:\s+and\s+Sources)?\s*</h[23]>[\s\S]*$"
+)
+_PLAIN_REFERENCES_TAIL_RE = re.compile(
+    r"\n\s*References(?:\s+and\s+Sources)?\s*\n[\s\S]*$",
+    re.IGNORECASE,
+)
 
 
 class WebSearchSource:
@@ -53,24 +60,35 @@ def web_search_unavailable_reason() -> str | None:
     return None
 
 
+def _looks_like_html(text: str) -> bool:
+    lowered = text.lower()
+    return "<p" in lowered or "<h2" in lowered or "<h3" in lowered or "<ul" in lowered
+
+
+def _escape_html(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
 def strip_references_section(text: str) -> str:
     if not text or not text.strip():
         return ""
-    pattern = re.compile(
-        r"\n\s*References(?:\s+and\s+Sources)?\s*\n[\s\S]*$",
-        re.IGNORECASE,
-    )
-    stripped = pattern.sub("", text.rstrip())
-    return stripped.rstrip()
+    stripped = _HTML_REFERENCES_TAIL_RE.sub("", text)
+    if stripped != text:
+        return stripped.rstrip()
+    return _PLAIN_REFERENCES_TAIL_RE.sub("", text.rstrip()).rstrip()
 
 
 def append_web_references(report_text: str, sources: list[WebSearchSource]) -> str:
     if not sources:
         return report_text
-    body = strip_references_section(report_text)
-    lines = [REFERENCES_HEADING, ""]
+    body = strip_references_section(report_text or "")
     seen_urls: set[str] = set()
-    index = 1
+    entries: list[tuple[str, str]] = []
     for source in sources:
         if not source.url and not source.title:
             continue
@@ -79,14 +97,31 @@ def append_web_references(report_text: str, sources: list[WebSearchSource]) -> s
             continue
         if url_key:
             seen_urls.add(url_key)
-        if source.url:
-            lines.append(f"{index}. {source.title} - {source.url}")
-        else:
-            lines.append(f"{index}. {source.title}")
-        index += 1
-    if index == 1:
+        entries.append((source.title or "Untitled", source.url))
+    if not entries:
         return report_text
-    return f"{body}\n\n" + "\n".join(lines)
+
+    if _looks_like_html(body):
+        items: list[str] = []
+        for title, url in entries:
+            safe_title = _escape_html(title)
+            if url:
+                safe_url = _escape_html(url)
+                items.append(
+                    f'<li><a href="{safe_url}" target="_blank" rel="noopener noreferrer">{safe_title}</a></li>'
+                )
+            else:
+                items.append(f"<li>{safe_title}</li>")
+        refs_html = f"<h2>{REFERENCES_HEADING}</h2><ul>{''.join(items)}</ul>"
+        return f"{body.rstrip()}{refs_html}" if body.strip() else refs_html
+
+    lines = [REFERENCES_HEADING, ""]
+    for index, (title, url) in enumerate(entries, start=1):
+        if url:
+            lines.append(f"{index}. {title} - {url}")
+        else:
+            lines.append(f"{index}. {title}")
+    return f"{body}\n\n" + "\n".join(lines) if body.strip() else "\n".join(lines)
 
 
 def search_web_for_report(
