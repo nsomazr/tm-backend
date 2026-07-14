@@ -6,6 +6,7 @@ from apps.geography.admin_boundary_service import lookup_boundaries_at_point
 from apps.geography.models import AdminBoundary, Country
 from apps.maps.access import layers_with_mapped_data
 from apps.maps.geometry_utils import geometry_bbox
+from apps.maps.layer_defaults import GENERAL_MINERAL_SLUG
 from apps.maps.localization import localized_name
 from apps.maps.models import MapFeature, MapLayer
 from apps.minerals.models import Mineral
@@ -274,6 +275,9 @@ def build_mineral_catalog(*, country_code: str = "TZ", user=None, locale: str = 
 
     for mineral in minerals:
         feature_count = mineral_counts.get(mineral.slug, 0)
+        # Shared "general" is only a grouping bucket — individual layers surface below.
+        if mineral.slug == GENERAL_MINERAL_SLUG:
+            continue
         entries_by_slug[mineral.slug] = {
             "id": mineral.id,
             "slug": mineral.slug,
@@ -308,7 +312,14 @@ def build_mineral_catalog(*, country_code: str = "TZ", user=None, locale: str = 
             continue
         if layer.slug in periodic_covered:
             continue
-        if layer.mineral_id and layer.mineral.slug in entries_by_slug:
+        mineral_slug = layer.mineral.slug if layer.mineral_id else None
+        # Dedicated commodities stay merged under the mineral slug. Layers parked
+        # on the shared ``general`` mineral each get their own navbar / catalog row.
+        if (
+            mineral_slug
+            and mineral_slug != GENERAL_MINERAL_SLUG
+            and mineral_slug in entries_by_slug
+        ):
             continue
         entries_by_slug[layer.slug] = _layer_catalog_entry(
             layer,

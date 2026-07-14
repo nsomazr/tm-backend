@@ -131,6 +131,12 @@ def process_layer_upload(upload_id):
                 update_fields.append("is_active")
             layer.save(update_fields=update_fields)
 
+            # Make sure the commodity can surface in the minerals navbar once data exists.
+            if count > 0 and layer.mineral_id:
+                from apps.minerals.models import Mineral
+
+                Mineral.objects.filter(pk=layer.mineral_id, is_active=False).update(is_active=True)
+
             changelog = f"Append from {filename}" if append else f"Import from {filename}"
             LayerVersion.objects.create(
                 layer=layer,
