@@ -7,7 +7,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.accounts.permissions import IsMineralManagerOrAdmin
+from apps.accounts.permissions import IsAdminUser, IsMineralManagerOrAdmin
 from apps.analytics.credits import InsufficientAssistantCredits, consume_assistant_credit, get_assistant_credit_quota
 from apps.minerals.permissions import get_managed_mineral_ids, user_can_manage_mineral
 
@@ -183,6 +183,11 @@ class ReportAdminDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = ReportAdminSerializer
     permission_classes = [IsMineralManagerOrAdmin]
     lookup_field = "slug"
+
+    def get_permissions(self):
+        if self.request.method == "DELETE":
+            return [IsAdminUser()]
+        return super().get_permissions()
 
     def get_queryset(self):
         return _admin_report_queryset(self.request.user)

@@ -12,6 +12,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.accounts.authentication import unauthorized_if_invalid_bearer
 from apps.accounts.models import User
 from apps.accounts.permissions import IsAdminUser
 from apps.maps.access import (
@@ -94,6 +95,10 @@ def _area_insight_param(request, key: str, default=None):
 
 
 def _build_area_insights_response(request):
+    auth_error = unauthorized_if_invalid_bearer(request)
+    if auth_error is not None:
+        return auth_error
+
     try:
         lat = float(_area_insight_param(request, "lat", ""))
         lng = float(_area_insight_param(request, "lng", ""))
@@ -246,6 +251,10 @@ def _build_area_insights_response(request):
         payload["ai_insight"] = generate_unmapped_insight(lat, lng, locale=locale)
         payload["insight_tier"] = "none"
 
+    # Geo reference / boundary geology is admin-private: used for AI quality only.
+    if not getattr(user, "is_admin_user", False):
+        payload.pop("geological_context", None)
+
     return Response(payload)
 
 
@@ -254,8 +263,11 @@ class HotspotAnalyticsView(APIView):
 
     def get(self, request):
         user = request.user
-        if not (user.has_paid_access or user.is_mineral_manager or user.is_admin_user):
-            return Response({"detail": "Subscription required."}, status=403)
+        if not user.can_use_analytics:
+            return Response(
+                {"detail": "Analytics require a Plus or Pro subscription."},
+                status=403,
+            )
 
         mineral_slug = request.query_params.get("mineral")
         qs = analytics_features_qs()
@@ -294,8 +306,11 @@ class InvestorDashboardView(APIView):
 
     def get(self, request):
         user = request.user
-        if not (user.has_paid_access or user.is_mineral_manager or user.is_admin_user):
-            return Response({"detail": "Subscription required."}, status=403)
+        if not user.can_use_analytics:
+            return Response(
+                {"detail": "Analytics require a Plus or Pro subscription."},
+                status=403,
+            )
 
         locale = get_request_locale(request)
         mineral_layer_filter = Q(
@@ -372,9 +387,11 @@ class MineralBoundaryCoverageView(PublicCatalogThrottleMixin, APIView):
 
 
 class LayerBoundaryCoverageView(PublicCatalogThrottleMixin, APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        if not user_has_map_detail_access(request.user):
+            return Response({"detail": "Subscription required."}, status=403)
         country_code = (request.query_params.get("country") or "TZ").upper()
         include_villages = request.query_params.get("include_villages", "").lower() in ("1", "true", "yes")
         raw_ids = (request.query_params.get("layer_ids") or "").strip()
@@ -395,21 +412,47 @@ class LayerBoundaryCoverageView(PublicCatalogThrottleMixin, APIView):
 
 
 class MineralHeatmapView(HeatmapThrottleMixin, APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, slug: str):
         from .mineral_heatmap import build_mineral_heatmap
-        from .mineral_exploration import get_mineral_exploration_quota, user_can_view_mineral_heatmap
+        from .mineral_exploration import (
+            MineralExplorationLimitExceeded,
+            ensure_mineral_exploration_allowed,
+            get_mineral_exploration_quota,
+            user_can_view_mineral_heatmap,
+        )
 
-        quota = get_mineral_exploration_quota(request, request.user)
         if slug == "general":
             return Response({"detail": "Heatmap is only available for mapped commodity layers."}, status=404)
+        quota = get_mineral_exploration_quota(request, request.user)
         if not user_can_view_mineral_heatmap(request.user, quota, slug):
+            plus_only = (
+                request.user.is_authenticated
+                and not request.user.is_admin_user
+                and getattr(request.user, "role", None) != User.Role.MINERAL_MANAGER
+                and not getattr(request.user, "can_use_analytics", False)
+            )
             return Response(
                 {
-                    "detail": "Mineral exploration limit reached for your plan.",
+                    "detail": (
+                        "Concentration heatmaps require a Plus or Pro subscription."
+                        if plus_only
+                        else "Mineral exploration limit reached for your plan."
+                    ),
                     "quota": quota,
                     "mineral_slug": slug,
+                },
+                status=403,
+            )
+        try:
+            quota = ensure_mineral_exploration_allowed(request, slug)
+        except MineralExplorationLimitExceeded as exc:
+            return Response(
+                {
+                    "detail": str(exc),
+                    "quota": exc.quota,
+                    "mineral_slug": exc.slug,
                 },
                 status=403,
             )
@@ -445,6 +488,86 @@ class MineralHeatmapView(HeatmapThrottleMixin, APIView):
         return Response(payload)
 
 
+class MineralInteractionHeatmapView(HeatmapThrottleMixin, APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from apps.maps.models import MapLayer
+
+        from .mineral_heatmap import build_multi_mineral_interaction_heatmap
+        from .mineral_exploration import (
+            MineralExplorationLimitExceeded,
+            ensure_mineral_exploration_allowed,
+            get_mineral_exploration_quota,
+            user_can_view_mineral_heatmap,
+        )
+
+        raw_layer_ids = (request.query_params.get("layer_ids") or "").strip()
+        layer_ids = [
+            int(part.strip())
+            for part in raw_layer_ids.split(",")
+            if part.strip().isdigit()
+        ]
+        if not layer_ids:
+            return Response({"detail": "layer_ids is required."}, status=400)
+
+        mineral_slugs = sorted(
+            {
+                slug
+                for slug in MapLayer.objects.filter(
+                    id__in=layer_ids,
+                    is_active=True,
+                ).values_list("mineral__slug", flat=True)
+                if slug and slug != "general"
+            }
+        )
+        if len(mineral_slugs) < 2:
+            return Response(
+                {"detail": "Select layers from at least two minerals."},
+                status=400,
+            )
+
+        quota = get_mineral_exploration_quota(request, request.user)
+        for slug in mineral_slugs:
+            if not user_can_view_mineral_heatmap(request.user, quota, slug):
+                return Response(
+                    {
+                        "detail": "Multi-mineral interaction requires Plus or Pro access and available mineral exploration quota.",
+                        "quota": quota,
+                        "mineral_slug": slug,
+                    },
+                    status=403,
+                )
+            try:
+                quota = ensure_mineral_exploration_allowed(request, slug)
+            except MineralExplorationLimitExceeded as exc:
+                return Response(
+                    {
+                        "detail": str(exc),
+                        "quota": exc.quota,
+                        "mineral_slug": exc.slug,
+                    },
+                    status=403,
+                )
+
+        payload = build_multi_mineral_interaction_heatmap(
+            layer_ids,
+            country_code=(request.query_params.get("country") or "TZ").upper(),
+            user=request.user,
+            locale=get_request_locale(request),
+        )
+        if not payload:
+            return Response(
+                {
+                    "detail": "Could not build a multi-mineral interaction heatmap for the selected layers.",
+                    "layer_ids": layer_ids,
+                },
+                status=400,
+            )
+        payload["exploration_quota"] = quota
+        return Response(payload)
+
+
 class MineralExplorationQuotaView(APIView):
     permission_classes = [AllowAny]
 
@@ -456,6 +579,10 @@ class SearchContextInsightsView(AIInsightThrottleMixin, APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
+        auth_error = unauthorized_if_invalid_bearer(request)
+        if auth_error is not None:
+            return auth_error
+
         mineral_slug = (request.query_params.get("mineral_slug") or "").strip()
         region_raw = (request.query_params.get("region_id") or "").strip()
         layer_raw = (request.query_params.get("layer_id") or "").strip()
@@ -611,6 +738,10 @@ class TerraAssistantChatView(AIChatThrottleMixin, APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        auth_error = unauthorized_if_invalid_bearer(request)
+        if auth_error is not None:
+            return auth_error
+
         question = (request.data.get("question") or "").strip()
         if not question:
             return Response({"detail": "question is required."}, status=400)
@@ -1024,6 +1155,25 @@ class AdminUserActivityAnalyticsView(APIView):
                 {"detail": "Could not build user activity analytics. Check server logs for details."},
                 status=500,
             )
+
+    def delete(self, request):
+        """Wipe exploration logs, Ask Terra credit usage, and saved chat threads."""
+        from apps.analytics.models import (
+            AssistantChatThread,
+            AssistantCreditUsage,
+            MineralExplorationLog,
+        )
+
+        credits_deleted, _ = AssistantCreditUsage.objects.all().delete()
+        explorations_deleted, _ = MineralExplorationLog.objects.all().delete()
+        threads_deleted, _ = AssistantChatThread.objects.all().delete()
+        return Response(
+            {
+                "assistant_credit_usages_deleted": credits_deleted,
+                "mineral_exploration_logs_deleted": explorations_deleted,
+                "assistant_chat_threads_deleted": threads_deleted,
+            }
+        )
 
 
 class AdminMineralAnalyticsView(APIView):

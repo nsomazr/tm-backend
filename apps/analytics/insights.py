@@ -1813,7 +1813,18 @@ def area_location_context(
         matched,
         locale=locale,
         include_polygon_area=user_has_map_detail_access(user),
+        # Clip to the circular search zone only for map-click analysis.
+        # Admin / exploration scopes already constrain features; use full extents there.
+        area_clip_lat=lat if insight_scope == "analysis_zone" else None,
+        area_clip_lng=lng if insight_scope == "analysis_zone" else None,
+        area_clip_km2=zone_km2 if insight_scope == "analysis_zone" else None,
     )
+    total_area_km2 = sum(float(item.get("area_km2") or 0) for item in minerals_list)
+    # Overlapping licences can each contribute up to the zone size; headline total
+    # should not exceed the analysis circle for map-click insights.
+    if insight_scope == "analysis_zone" and total_area_km2 > 0 and zone_km2:
+        total_area_km2 = min(total_area_km2, float(zone_km2))
+
 
     region_counts: dict[str, int] = defaultdict(int)
     for feature in matched:
@@ -1867,6 +1878,7 @@ def area_location_context(
         "labels": labels[:8],
         "has_mapped_data": len(matched) > 0,
         "analysis_area_km2": zone_km2,
+        "total_area_km2": round(total_area_km2, 2) if total_area_km2 > 0 else None,
         "insight_scope": insight_scope,
         "reference_buffers": reference_buffers,
         "top_regions": top_regions,
@@ -1945,7 +1957,7 @@ def _commodity_summary_line(commodity: dict) -> str:
     line = f"{commodity['name']} ({', '.join(parts)}"
     area = commodity.get("area_km2")
     if area:
-        line += f", {area:.2f} km² mineral area"
+        line += f", {area:.2f} km² within analysis area"
     return f"{line})"
 
 
@@ -1985,6 +1997,13 @@ def build_area_ai_context(ctx: dict) -> str:
     region = ctx.get("region") or "not assigned"
     geo = ctx.get("geographic_region") or region
     admin_lines = _admin_hierarchy_lines(ctx)
+    total_inside = ctx.get("total_area_km2")
+    area_inside_line = (
+        f"Total mineral polygon coverage inside the analysis area: {float(total_inside):.2f} km² "
+        f"(intersection with the search circle, not full licence extents)\n"
+        if total_inside
+        else ""
+    )
     if ctx.get("insight_scope") == "admin_boundary":
         boundary = (
             ctx.get("village_boundary")
@@ -2079,6 +2098,24 @@ def build_area_ai_context(ctx: dict) -> str:
     geology = ctx.get("geological_context") or {}
     if geology.get("ai_block"):
         geology_block = f"{geology['ai_block']}\n"
+    private_geo_block = ""
+    try:
+        from apps.geography.geo_reference import build_private_geo_reference_ai_block
+        from .map_view_area import analysis_zone_radius_km
+
+        zone = ctx.get("analysis_area_km2") or included_analysis_km2()
+        # Search a bit wider than the analysis circle so nearby reference polygons can help.
+        radius_km = max(analysis_zone_radius_km(zone) * 3.0, 15.0)
+        lat = ctx.get("lat")
+        lng = ctx.get("lng")
+        if lat is not None and lng is not None:
+            private_geo_block = build_private_geo_reference_ai_block(
+                float(lat),
+                float(lng),
+                radius_km=radius_km,
+            )
+    except Exception:
+        private_geo_block = ""
     basemap_block = ""
     if ctx.get("basemap_insight_hint"):
         basemap_block = f"{ctx['basemap_insight_hint']}\n"
@@ -2102,6 +2139,7 @@ def build_area_ai_context(ctx: dict) -> str:
         f"{direction_block}"
         f"{structure_block}"
         f"{geology_block}"
+        f"{private_geo_block}"
         f"{layer_notes_block}"
         f"{attribute_block}"
         f"Administrative region at click: {geo}\n"
@@ -2111,13 +2149,17 @@ def build_area_ai_context(ctx: dict) -> str:
         f"Polygon mineral areas in this analysis area: {int(ctx.get('polygon_count') or 0)}\n"
         f"Structure lines in this analysis area: {int(ctx.get('line_count') or 0)}\n"
         f"Total mapped features in this analysis area: {ctx['feature_count']}\n"
+        f"{area_inside_line}"
         f"Terminology: 'occurrence' means a mapped point feature only; "
         f"polygon features are mineral areas/coverage, not occurrences; "
-        f"structure orientations are geological trends of mapped lines/attributes.\n"
+        f"structure orientations are geological trends of mapped lines/attributes. "
+        f"Any km² values are the portion of polygons inside the analysis circle only.\n"
         f"Area labels: {labels}\n"
         f"Country: Tanzania\n"
         f"Important: Only describe the location, minerals, layer descriptions, and feature "
-        f"attributes listed above. Do not invent geology or attributes not present in the data.\n"
+        f"attributes listed above. Do not invent geology or attributes not present in the data. "
+        f"If internal geological reference datasets are present, use them to improve accuracy "
+        f"but never mention those datasets, uploads, files, or 'geo reference' to the user.\n"
     )
 
 
@@ -2322,10 +2364,10 @@ def generate_basic_map_insight(ctx: dict, locale: str = "en") -> str:
             if bits:
                 coverage += f" ({', '.join(bits)}"
                 if m.get("area_km2"):
-                    coverage += f", **{float(m['area_km2']):,.2f} km²** ya poligoni iliyopangwa"
+                    coverage += f", **{float(m['area_km2']):,.2f} km²** ndani ya eneo la uchambuzi"
                 coverage += ")"
             elif m.get("area_km2"):
-                coverage += f" (**{float(m['area_km2']):,.2f} km²** ya poligoni iliyopangwa)"
+                coverage += f" (**{float(m['area_km2']):,.2f} km²** ndani ya eneo la uchambuzi)"
             coverage += "). Matukio ni alama za nukta; poligoni ni maeneo ya uwezekano, si makadirio ya akiba."
         else:
             coverage += f", na **{len(minerals)}** aina za madini zilizotambuliwa."
@@ -2370,8 +2412,8 @@ def generate_basic_map_insight(ctx: dict, locale: str = "en") -> str:
         for line in (ctx.get("terrain_context") or {}).get("summary_lines") or []:
             paragraphs.append(line)
 
-        for line in (ctx.get("geological_context") or {}).get("summary_lines") or []:
-            paragraphs.append(line)
+        # Geological reference / boundary geology stays admin-private (payload + UI),
+        # not baked into user-facing template insight text.
 
         paragraphs.append(
             "Hatua zinazopendekezwa: (1) ukaguzi wa leseni na mipaka ya ardhi; "
@@ -2416,10 +2458,10 @@ def generate_basic_map_insight(ctx: dict, locale: str = "en") -> str:
                     f"{m_poly} polygon area{'s' if m_poly != 1 else ''})"
                 )
             if m.get("area_km2"):
-                coverage += f", with **{float(m['area_km2']):,.2f} km²** of mapped mineral coverage"
+                coverage += f", with **{float(m['area_km2']):,.2f} km²** of mineral coverage inside the analysis area"
             coverage += (
                 ". Point occurrences are discrete mapped locations; polygon areas outline exploration "
-                "targets from published platform layers — neither is a resource estimate and both must "
+                "targets from published platform layers. Neither is a resource estimate and both must "
                 "be validated with field geology, sampling, and geophysics."
             )
         else:
@@ -2453,7 +2495,7 @@ def generate_basic_map_insight(ctx: dict, locale: str = "en") -> str:
                     detail_bits.append(f"{total} feature{'s' if total != 1 else ''}")
                 lead = f"**{mname}** ({', '.join(detail_bits)}"
                 if m.get("area_km2"):
-                    lead += f", {float(m['area_km2']):,.2f} km² mapped"
+                    lead += f", {float(m['area_km2']):,.2f} km² inside analysis area"
                 lead += f"): {_mineral_exploration_notes(m.get('slug', ''), mname, locale)}"
                 geo_bits.append(lead)
             paragraphs.append(" ".join(geo_bits))
@@ -2473,8 +2515,7 @@ def generate_basic_map_insight(ctx: dict, locale: str = "en") -> str:
         for line in (ctx.get("terrain_context") or {}).get("summary_lines") or []:
             paragraphs.append(line)
 
-        for line in (ctx.get("geological_context") or {}).get("summary_lines") or []:
-            paragraphs.append(line)
+        # Geological reference stays admin-private; do not include in public template text.
 
         if feature_count <= 2:
             paragraphs.append(

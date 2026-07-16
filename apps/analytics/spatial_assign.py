@@ -189,9 +189,23 @@ def commodities_from_features(
     locale: str = "en",
     *,
     include_polygon_area: bool = False,
+    area_clip_lat: float | None = None,
+    area_clip_lng: float | None = None,
+    area_clip_km2: float | None = None,
 ) -> list[dict[str, Any]]:
-    from apps.maps.geometry_utils import geometry_area_km2
+    from apps.maps.geometry_utils import geometry_area_in_circle_km2, geometry_area_km2
     from apps.maps.localization import localized_name
+    from apps.analytics.map_view_area import analysis_zone_radius_km
+
+    clip_radius_km = None
+    if (
+        include_polygon_area
+        and area_clip_lat is not None
+        and area_clip_lng is not None
+        and area_clip_km2
+        and float(area_clip_km2) > 0
+    ):
+        clip_radius_km = analysis_zone_radius_km(float(area_clip_km2))
 
     counts: dict[int, dict[str, Any]] = {}
     for feature in features:
@@ -218,7 +232,15 @@ def commodities_from_features(
         elif is_polygon_feature(feature):
             counts[layer.id]["polygon_count"] += 1
             if include_polygon_area:
-                counts[layer.id]["area_km2"] += geometry_area_km2(feature.geometry)
+                if clip_radius_km is not None:
+                    counts[layer.id]["area_km2"] += geometry_area_in_circle_km2(
+                        feature.geometry,
+                        float(area_clip_lat),
+                        float(area_clip_lng),
+                        clip_radius_km,
+                    )
+                else:
+                    counts[layer.id]["area_km2"] += geometry_area_km2(feature.geometry)
         elif is_line_feature(feature):
             counts[layer.id]["line_count"] += 1
 

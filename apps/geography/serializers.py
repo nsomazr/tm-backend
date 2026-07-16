@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import AdminBoundary, BoundaryGeologyDocument, Country, Region
+from .models import AdminBoundary, BoundaryGeologyDocument, Country, GeoReference, Region
 
 
 class CountrySerializer(serializers.ModelSerializer):
@@ -95,3 +95,31 @@ class AdminBoundaryGeologySerializer(serializers.ModelSerializer):
 
     def get_level_label(self, obj: AdminBoundary) -> str:
         return AdminBoundary.Level(obj.level).label
+
+
+class GeoReferenceSerializer(serializers.ModelSerializer):
+    country_code = serializers.CharField(source="country.code", read_only=True, allow_null=True)
+    uploaded_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = GeoReference
+        fields = (
+            "id",
+            "name",
+            "slug",
+            "country",
+            "country_code",
+            "source_filename",
+            "feature_count",
+            "bounds",
+            "is_active",
+            "uploaded_by_name",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+    def get_uploaded_by_name(self, obj: GeoReference) -> str:
+        if obj.uploaded_by_id and obj.uploaded_by:
+            return obj.uploaded_by.get_username()
+        return ""

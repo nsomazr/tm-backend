@@ -129,15 +129,19 @@ def can_explore_mineral(quota: dict, slug: str) -> bool:
 
 
 def user_can_view_mineral_heatmap(user, quota: dict, slug: str) -> bool:
-    """Paid map access includes heatmap overlay; free tier uses explore quota."""
+    """Concentration heatmaps: Plus/Pro (and staff), and they consume explore quota."""
     slug = (slug or "").strip()
     if not slug:
         return False
-    if user and getattr(user, "is_authenticated", False):
-        if getattr(user, "is_admin_user", False) or getattr(user, "has_paid_access", False):
-            return True
-        if getattr(user, "role", None) == User.Role.MINERAL_MANAGER:
-            return True
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "is_admin_user", False):
+        return True
+    if getattr(user, "role", None) == User.Role.MINERAL_MANAGER:
+        return True
+    # Starter / Explorer: show-on-map yes; concentration overlays are Plus/Pro only.
+    if not getattr(user, "can_use_analytics", False):
+        return False
     return can_explore_mineral(quota, slug)
 
 

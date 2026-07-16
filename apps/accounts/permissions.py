@@ -5,10 +5,8 @@ from .models import User
 
 class IsAdminUser(BasePermission):
     def has_permission(self, request, view):
-        return (
-            request.user.is_authenticated
-            and request.user.role in (User.Role.SUPER_ADMIN, User.Role.ADMIN)
-        )
+        user = request.user
+        return user.is_authenticated and bool(getattr(user, "is_admin_user", False))
 
 
 class IsSuperAdmin(BasePermission):
@@ -23,8 +21,7 @@ class IsMineralManagerOrAdmin(BasePermission):
     def has_permission(self, request, view):
         if not request.user.is_authenticated:
             return False
-        return request.user.role in (
-            User.Role.SUPER_ADMIN,
-            User.Role.ADMIN,
-            User.Role.MINERAL_MANAGER,
-        )
+        if getattr(request.user, "is_admin_user", False):
+            return True
+        return request.user.role == User.Role.MINERAL_MANAGER
+

@@ -11,6 +11,8 @@ from .staff_sync import is_privileged_role, sync_user_staff_flags
 class UserSerializer(serializers.ModelSerializer):
     has_paid_access = serializers.BooleanField(read_only=True)
     can_save_explorations = serializers.BooleanField(read_only=True)
+    can_use_analytics = serializers.BooleanField(read_only=True)
+    current_plan = serializers.SerializerMethodField()
     assistant_credits = serializers.SerializerMethodField()
     mineral_exploration = serializers.SerializerMethodField()
 
@@ -28,11 +30,43 @@ class UserSerializer(serializers.ModelSerializer):
             "profile_complete",
             "has_paid_access",
             "can_save_explorations",
+            "can_use_analytics",
+            "current_plan",
             "assistant_credits",
             "mineral_exploration",
             "created_at",
         )
         read_only_fields = ("id", "role", "created_at")
+
+    def get_current_plan(self, obj):
+        if obj.is_admin_user:
+            return {
+                "slug": "staff",
+                "name": "Staff",
+                "billing_cycle": None,
+                "days_until_expiry": None,
+            }
+        if obj.role == User.Role.MINERAL_MANAGER and not obj.has_paid_access:
+            return {
+                "slug": "mineral-manager",
+                "name": "Mineral manager",
+                "billing_cycle": None,
+                "days_until_expiry": None,
+            }
+        sub = obj.get_active_paid_subscription()
+        if not sub:
+            return {
+                "slug": "explorer",
+                "name": "Explorer",
+                "billing_cycle": None,
+                "days_until_expiry": None,
+            }
+        return {
+            "slug": sub.plan.slug,
+            "name": sub.plan.name,
+            "billing_cycle": sub.plan.billing_cycle,
+            "days_until_expiry": sub.days_until_expiry,
+        }
 
     def get_assistant_credits(self, obj):
         request = self.context.get("request")

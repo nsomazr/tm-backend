@@ -48,11 +48,8 @@ class MineralViewSet(viewsets.ModelViewSet):
         return qs
 
     def get_permissions(self):
-        if self.action in ("create", "destroy"):
+        if self.action in ("create", "destroy", "update", "partial_update"):
             return [IsAdminUser()]
-        if self.action in ("update", "partial_update"):
-            from apps.accounts.permissions import IsMineralManagerOrAdmin
-            return [IsMineralManagerOrAdmin()]
         return super().get_permissions()
 
     def perform_update(self, serializer):

@@ -46,6 +46,54 @@ def _normalize_commodity_labels(value) -> list[str]:
     raise serializers.ValidationError("commodity_labels must be a list of strings.")
 
 
+def _compose_commodity_labels(primary: str, others: list[str]) -> list[str]:
+    labels: list[str] = []
+    primary_text = (primary or "").strip()[:80]
+    if primary_text:
+        labels.append(primary_text)
+    for item in others:
+        text = str(item).strip()[:80]
+        if not text:
+            continue
+        if any(existing.lower() == text.lower() for existing in labels):
+            continue
+        labels.append(text)
+        if len(labels) >= 20:
+            break
+    return labels
+
+
+def _sync_mineral_fields(validated_data: dict, *, instance=None) -> dict:
+    """Keep primary_mineral / other_minerals / commodity_labels in sync."""
+    has_primary = "primary_mineral" in validated_data
+    has_others = "other_minerals" in validated_data
+    has_labels = "commodity_labels" in validated_data
+
+    if has_primary or has_others:
+        primary = validated_data.get(
+            "primary_mineral",
+            getattr(instance, "primary_mineral", "") if instance else "",
+        )
+        others = validated_data.get(
+            "other_minerals",
+            getattr(instance, "other_minerals", []) if instance else [],
+        )
+        primary = (primary or "").strip()[:80]
+        others = _normalize_commodity_labels(others)
+        others = [item for item in others if item.lower() != primary.lower()]
+        validated_data["primary_mineral"] = primary
+        validated_data["other_minerals"] = others
+        validated_data["commodity_labels"] = _compose_commodity_labels(primary, others)
+        return validated_data
+
+    if has_labels:
+        labels = _normalize_commodity_labels(validated_data.get("commodity_labels"))
+        validated_data["commodity_labels"] = labels
+        validated_data["primary_mineral"] = labels[0] if labels else ""
+        validated_data["other_minerals"] = labels[1:]
+    return validated_data
+
+
 class ListingDocumentSerializer(serializers.ModelSerializer):
     file_url = serializers.SerializerMethodField()
 
@@ -96,6 +144,7 @@ class PublicListingDocumentSerializer(serializers.ModelSerializer):
 
 class PublicListingListSerializer(serializers.ModelSerializer):
     commodity_labels = serializers.ListField(child=serializers.CharField(), read_only=True)
+    other_minerals = serializers.ListField(child=serializers.CharField(), read_only=True)
     geometry_type = serializers.SerializerMethodField()
 
     class Meta:
@@ -106,6 +155,8 @@ class PublicListingListSerializer(serializers.ModelSerializer):
             "title",
             "summary",
             "commodity_labels",
+            "primary_mineral",
+            "other_minerals",
             "center_lat",
             "center_lng",
             "geometry_type",
@@ -120,6 +171,7 @@ class PublicListingListSerializer(serializers.ModelSerializer):
 
 class PublicListingDetailSerializer(serializers.ModelSerializer):
     commodity_labels = serializers.ListField(child=serializers.CharField(), read_only=True)
+    other_minerals = serializers.ListField(child=serializers.CharField(), read_only=True)
     documents = serializers.SerializerMethodField()
     contact_name = serializers.SerializerMethodField()
     contact_email = serializers.SerializerMethodField()
@@ -141,6 +193,8 @@ class PublicListingDetailSerializer(serializers.ModelSerializer):
             "center_lng",
             "bounding_box",
             "commodity_labels",
+            "primary_mineral",
+            "other_minerals",
             "show_contact_public",
             "allow_inquiries",
             "contact_name",
@@ -170,6 +224,7 @@ class PublicListingDetailSerializer(serializers.ModelSerializer):
 class OwnerListingSerializer(serializers.ModelSerializer):
     documents = ListingDocumentSerializer(many=True, read_only=True)
     commodity_labels = serializers.JSONField(required=False)
+    other_minerals = serializers.JSONField(required=False)
     inquiry_unread_count = serializers.SerializerMethodField()
     inquiry_count = serializers.SerializerMethodField()
 
@@ -187,6 +242,8 @@ class OwnerListingSerializer(serializers.ModelSerializer):
             "center_lng",
             "bounding_box",
             "commodity_labels",
+            "primary_mineral",
+            "other_minerals",
             "status",
             "show_on_map",
             "contact_name",
@@ -237,6 +294,12 @@ class OwnerListingSerializer(serializers.ModelSerializer):
     def validate_commodity_labels(self, value):
         return _normalize_commodity_labels(value)
 
+    def validate_other_minerals(self, value):
+        return _normalize_commodity_labels(value)
+
+    def validate_primary_mineral(self, value):
+        return (value or "").strip()[:80]
+
     def validate_geometry(self, value):
         if value in (None, "", {}, []):
             return {}
@@ -283,6 +346,7 @@ class OwnerListingSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         title = validated_data["title"]
         validated_data["slug"] = unique_listing_slug(title)
+        validated_data = _sync_mineral_fields(validated_data)
         validated_data = self._apply_derived_fields(validated_data)
         return super().create(validated_data)
 
@@ -291,6 +355,7 @@ class OwnerListingSerializer(serializers.ModelSerializer):
             validated_data["slug"] = unique_listing_slug(
                 validated_data["title"], exclude_pk=instance.pk
             )
+        validated_data = _sync_mineral_fields(validated_data, instance=instance)
         validated_data = self._apply_derived_fields(validated_data, instance=instance)
         return super().update(instance, validated_data)
 

@@ -25,13 +25,14 @@ from .admin_boundary_service import (
 from .boundary_import_job import get_import_status, start_boundary_import
 from .boundary_map_cache import build_village_display_cache, load_village_display_cache
 from .country_geo import country_focus_payload, ensure_country
-from .models import AdminBoundary, BoundaryGeologyDocument, Country, Region
+from .models import AdminBoundary, BoundaryGeologyDocument, Country, GeoReference, Region
 from .serializers import (
     AdminBoundaryGeologySerializer,
     AdminBoundaryGeologyUpdateSerializer,
     AdminBoundaryListItemSerializer,
     BoundaryGeologyDocumentSerializer,
     CountrySerializer,
+    GeoReferenceSerializer,
     RegionSerializer,
 )
 
@@ -329,3 +330,87 @@ class AdminBoundaryGeologyDocumentView(APIView):
         if not deleted:
             return Response({"detail": "Document not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AdminGeoReferenceListCreateView(APIView):
+    """List / create admin-only geo reference shapefile datasets."""
+
+    permission_classes = [IsAdminUser]
+    parser_classes = [MultiPartParser, FormParser]
+    throttle_classes = [AdminUploadThrottle]
+
+    def get(self, request):
+        qs = GeoReference.objects.select_related("country", "uploaded_by").all()
+        return Response({"results": GeoReferenceSerializer(qs, many=True).data})
+
+    def post(self, request):
+        from .geo_reference import create_geo_reference_from_upload
+
+        name = (request.data.get("name") or "").strip()
+        upload = request.FILES.get("file")
+        if not name:
+            return Response({"detail": "Name is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if not upload:
+            return Response({"detail": "file is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            validate_upload_filename(upload.name)
+            validate_upload_size(upload.size, boundary=False)
+            check_disk_headroom(boundary=False)
+        except UploadValidationError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        country = None
+        country_code = (request.data.get("country") or "").strip().upper()
+        if country_code:
+            country = Country.objects.filter(code=country_code).first()
+
+        try:
+            content = upload.read()
+            geo_ref = create_geo_reference_from_upload(
+                name=name,
+                content=content,
+                filename=upload.name,
+                user=request.user,
+                country=country,
+            )
+        except ValueError as exc:
+            return Response({"detail": friendly_upload_error(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            return Response({"detail": friendly_upload_error(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(GeoReferenceSerializer(geo_ref).data, status=status.HTTP_201_CREATED)
+
+
+class AdminGeoReferenceDetailView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request, pk: int):
+        try:
+            geo_ref = GeoReference.objects.select_related("country", "uploaded_by").get(pk=pk)
+        except GeoReference.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(GeoReferenceSerializer(geo_ref).data)
+
+    def delete(self, request, pk: int):
+        deleted, _ = GeoReference.objects.filter(pk=pk).delete()
+        if not deleted:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AdminGeoReferenceGeoJsonView(APIView):
+    """FeatureCollection for the admin geo-reference map (all or one dataset)."""
+
+    permission_classes = [IsAdminUser]
+
+    def get(self, request, pk: int | None = None):
+        from .geo_reference import geo_reference_feature_collection
+
+        geo_ref = None
+        if pk is not None:
+            try:
+                geo_ref = GeoReference.objects.get(pk=pk, is_active=True)
+            except GeoReference.DoesNotExist:
+                return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(geo_reference_feature_collection(geo_ref))

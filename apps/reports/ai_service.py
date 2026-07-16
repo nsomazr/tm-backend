@@ -58,37 +58,31 @@ def _post_with_rate_limit_retry(**kwargs):
 
 MAP_INSIGHT_PROMPT = (
     "You are Terra Meta's senior exploration geologist. "
-    "Using ONLY the mapped data in the user message, write 4-5 substantive paragraphs "
-    "(roughly 280-420 words) for mineral explorers and investors. "
+    "Using ONLY the mapped data in the user message, write 3 concise paragraphs "
+    "(roughly 160-240 words) for mineral explorers and investors. "
     "Cover: location and analysis scope; mapped point occurrences and polygon mineral areas "
     "with exact counts (occurrence = point feature only); "
-    "compass-direction clustering relative to the analysis center when sector counts are provided; "
-    "mapped structure orientations (geological trend/strike) when provided — treat these as fabric, "
-    "distinct from compass clustering of features around the analysis center; "
-    "geological and exploration implications for each commodity listed; a recommended "
-    "field program (mapping, sampling, geophysics, licensing); and data limitations. "
+    "compass-direction clustering when sector counts are provided; "
+    "structure orientations when provided; brief implications and next field steps; data limits. "
     "Write flowing geological prose in natural paragraphs. Do not use bullet lists or markdown headings. "
     "Use **bold** sparingly for mineral and region names only. "
     "If minerals are listed in the analysis area, describe them; never claim there are no mapped areas. "
     "Use the word occurrence only for mapped point features; call polygons mineral areas or coverage. "
     "When compass distribution data is included, describe how areas lie north/south/east/west of the "
-    "analysis center and note commodity-specific directional clustering only when supported by the counts. "
-    "When structure orientation data is included, describe dominant trends (for example NE–SW) using "
-    "only those counts; do not invent fold axes, fault sense, or dip. "
-    "When geological reference from administrative boundaries is included, integrate it with mapped "
-    "mineral data to explain regional setting, stratigraphy, and exploration implications. "
-    "When terrain elevation metrics are included, describe surface relief and landform character only; "
-    "do not equate lowland or flat terrain with sedimentary basins unless geological reference supports it. "
-    "When a map view type is specified (satellite, terrain, etc.), tailor emphasis to what that view "
-    "highlights, but never invent features not supported by the data or image. "
+    "analysis center only when supported by the counts. "
+    "When structure orientation data is included, describe dominant trends using only those counts; "
+    "do not invent fold axes, fault sense, or dip. "
+    "When geological reference from administrative boundaries is included, integrate it briefly. "
+    "When terrain elevation metrics are included, describe surface relief only; "
+    "do not equate lowland with sedimentary basins unless geological reference supports it. "
     "Use only administrative names and geography provided; do not invent coastlines, reserves, "
     "drill intercepts, or deposit models not supported by the data."
 )
 
 TERRAIN_VISUAL_INSIGHT_PROMPT = (
     "You are Terra Meta's senior exploration geologist with access to a map screenshot and "
-    "structured exploration data. Using ONLY the image and text context provided, write 4-5 "
-    "substantive paragraphs (roughly 280-420 words) for mineral explorers and investors. "
+    "structured exploration data. Using ONLY the image and text context provided, write 3 "
+    "concise paragraphs (roughly 160-240 words) for mineral explorers and investors. "
     "Describe visible landforms cautiously: ridges, valleys, drainage, vegetation, exposed rock, "
     "and lineaments only when you can see them in the image. Cross-check visual observations "
     "with mapped mineral counts, terrain elevation metrics, and geological reference text. "
@@ -100,6 +94,10 @@ TERRAIN_VISUAL_INSIGHT_PROMPT = (
 )
 
 GEOLOGICAL_MAP_INSIGHT_PROMPT = MAP_INSIGHT_PROMPT
+
+MAP_INSIGHT_MAX_TOKENS = 520
+MAP_INSIGHT_HTTP_TIMEOUT = 45
+MAP_VISION_HTTP_TIMEOUT = 30
 
 EXPORT_NARRATIVE_PROMPT = (
     "You are Terra Meta's mineral intelligence report writer. Using ONLY the structured data below, "
@@ -303,25 +301,8 @@ def generate_geological_map_insight(
     image_b64: str | None = None,
 ) -> tuple[str, str]:
     """Geological exploration narrative for map clicks. Returns (insight_text, model_used)."""
-    if image_b64:
-        from apps.analytics.ai_settings import vision_provider_chain
-
-        user_msg = f"Mapped exploration data for this location:\n\n{context}"
-        for provider in vision_provider_chain():
-            try:
-                if provider == "gemini":
-                    text = _gemini_vision(TERRAIN_VISUAL_INSIGHT_PROMPT, user_msg, image_b64)
-                elif provider == "ollama":
-                    text = _ollama_vision(TERRAIN_VISUAL_INSIGHT_PROMPT, user_msg, image_b64)
-                else:
-                    continue
-                if text and text.strip():
-                    return sanitize_assistant_output(text.strip()), _model_label(provider)
-            except Exception as exc:
-                logger.warning("Vision map insight provider %s failed: %s", provider, exc)
-
+    # Prefer fast text providers first; vision is optional enrichment with a short timeout.
     providers = _provider_chain()
-    errors = []
 
     for provider in providers:
         try:
@@ -330,7 +311,35 @@ def generate_geological_map_insight(
                 return sanitize_assistant_output(text.strip()), _model_label(provider)
         except Exception as exc:
             logger.warning("Geological map insight provider %s failed: %s", provider, exc)
-            errors.append(friendly_provider_error(provider, exc))
+
+    if image_b64:
+        from apps.analytics.ai_settings import vision_provider_chain
+
+        user_msg = f"Mapped exploration data for this location:\n\n{context}"
+        for provider in vision_provider_chain():
+            try:
+                if provider == "gemini":
+                    text = _gemini_vision(
+                        TERRAIN_VISUAL_INSIGHT_PROMPT,
+                        user_msg,
+                        image_b64,
+                        max_tokens=MAP_INSIGHT_MAX_TOKENS,
+                        timeout=MAP_VISION_HTTP_TIMEOUT,
+                    )
+                elif provider == "ollama":
+                    text = _ollama_vision(
+                        TERRAIN_VISUAL_INSIGHT_PROMPT,
+                        user_msg,
+                        image_b64,
+                        max_tokens=MAP_INSIGHT_MAX_TOKENS,
+                        timeout=MAP_VISION_HTTP_TIMEOUT,
+                    )
+                else:
+                    continue
+                if text and text.strip():
+                    return sanitize_assistant_output(text.strip()), _model_label(provider)
+            except Exception as exc:
+                logger.warning("Vision map insight provider %s failed: %s", provider, exc)
 
     return "fallback", "fallback"
 
@@ -338,11 +347,26 @@ def generate_geological_map_insight(
 def _call_geological_map_provider(provider: str, context: str) -> str:
     user_msg = f"Mapped exploration data for this location:\n\n{context}"
     if provider == "ollama":
-        return _ollama_custom(user_msg, GEOLOGICAL_MAP_INSIGHT_PROMPT)
+        return _ollama_custom(
+            user_msg,
+            GEOLOGICAL_MAP_INSIGHT_PROMPT,
+            max_tokens=MAP_INSIGHT_MAX_TOKENS,
+            timeout=MAP_INSIGHT_HTTP_TIMEOUT,
+        )
     if provider == "groq":
-        return _groq_custom(user_msg, GEOLOGICAL_MAP_INSIGHT_PROMPT)
+        return _groq_custom(
+            user_msg,
+            GEOLOGICAL_MAP_INSIGHT_PROMPT,
+            max_tokens=MAP_INSIGHT_MAX_TOKENS,
+            timeout=MAP_INSIGHT_HTTP_TIMEOUT,
+        )
     if provider == "gemini":
-        return _gemini_custom(user_msg, GEOLOGICAL_MAP_INSIGHT_PROMPT)
+        return _gemini_custom(
+            user_msg,
+            GEOLOGICAL_MAP_INSIGHT_PROMPT,
+            max_tokens=MAP_INSIGHT_MAX_TOKENS,
+            timeout=MAP_INSIGHT_HTTP_TIMEOUT,
+        )
     raise ValueError(f"Unknown intelligence provider: {provider}")
 
 
@@ -780,16 +804,28 @@ def _gemini(context: str) -> str:
     return _gemini_custom(f"Summarize this mineral report:\n\n{context}", SYSTEM_PROMPT)
 
 
-def _ollama_custom(user_content: str, system_prompt: str) -> str:
+def _ollama_custom(
+    user_content: str,
+    system_prompt: str,
+    *,
+    max_tokens: int = 900,
+    timeout: int = 90,
+) -> str:
     return _ollama_messages(
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
-        ]
+        ],
+        max_tokens=max_tokens,
+        timeout=timeout,
     )
 
 
-def _ollama_messages(messages: list[dict[str, str]], max_tokens: int = 900) -> str:
+def _ollama_messages(
+    messages: list[dict[str, str]],
+    max_tokens: int = 900,
+    timeout: int = 90,
+) -> str:
     from apps.analytics.ai_settings import ollama_resolve_model, _ollama_active_base
 
     model = ollama_resolve_model()
@@ -807,21 +843,33 @@ def _ollama_messages(messages: list[dict[str, str]], max_tokens: int = 900) -> s
         "stream": False,
         "options": {"num_predict": max_tokens},
     }
-    response = requests.post(url, json=payload, timeout=90)
+    response = requests.post(url, json=payload, timeout=timeout)
     response.raise_for_status()
     return response.json()["message"]["content"]
 
 
-def _groq_custom(user_content: str, system_prompt: str) -> str:
+def _groq_custom(
+    user_content: str,
+    system_prompt: str,
+    *,
+    max_tokens: int = 900,
+    timeout: int = 60,
+) -> str:
     return _groq_messages(
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
-        ]
+        ],
+        max_tokens=max_tokens,
+        timeout=timeout,
     )
 
 
-def _groq_messages(messages: list[dict[str, str]], max_tokens: int = 900) -> str:
+def _groq_messages(
+    messages: list[dict[str, str]],
+    max_tokens: int = 900,
+    timeout: int = 60,
+) -> str:
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {settings.GROQ_API_KEY}",
@@ -833,20 +881,32 @@ def _groq_messages(messages: list[dict[str, str]], max_tokens: int = 900) -> str
         "max_tokens": max_tokens,
         "temperature": 0.35,
     }
-    response = _post_with_rate_limit_retry(url=url, headers=headers, json=payload, timeout=60)
+    response = _post_with_rate_limit_retry(url=url, headers=headers, json=payload, timeout=timeout)
     return response.json()["choices"][0]["message"]["content"]
 
 
-def _gemini_custom(user_content: str, system_prompt: str) -> str:
+def _gemini_custom(
+    user_content: str,
+    system_prompt: str,
+    *,
+    max_tokens: int = 900,
+    timeout: int = 60,
+) -> str:
     return _gemini_messages(
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
-        ]
+        ],
+        max_tokens=max_tokens,
+        timeout=timeout,
     )
 
 
-def _gemini_messages(messages: list[dict[str, str]], max_tokens: int = 900) -> str:
+def _gemini_messages(
+    messages: list[dict[str, str]],
+    max_tokens: int = 900,
+    timeout: int = 60,
+) -> str:
     model = settings.GEMINI_MODEL
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -862,7 +922,7 @@ def _gemini_messages(messages: list[dict[str, str]], max_tokens: int = 900) -> s
         "contents": [{"parts": [{"text": "\n\n".join(parts)}]}],
         "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.35},
     }
-    response = _post_with_rate_limit_retry(url=url, json=payload, timeout=60)
+    response = _post_with_rate_limit_retry(url=url, json=payload, timeout=timeout)
     data = response.json()
     return data["candidates"][0]["content"]["parts"][0]["text"]
 
@@ -876,7 +936,13 @@ def _normalize_image_b64(image_b64: str) -> tuple[str, str]:
     return "image/jpeg", re.sub(r"\s+", "", raw)
 
 
-def _gemini_vision(system_prompt: str, user_content: str, image_b64: str, max_tokens: int = 900) -> str:
+def _gemini_vision(
+    system_prompt: str,
+    user_content: str,
+    image_b64: str,
+    max_tokens: int = 900,
+    timeout: int = 90,
+) -> str:
     mime, payload_b64 = _normalize_image_b64(image_b64)
     model = settings.GEMINI_MODEL
     url = (
@@ -894,12 +960,18 @@ def _gemini_vision(system_prompt: str, user_content: str, image_b64: str, max_to
         ],
         "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.35},
     }
-    response = _post_with_rate_limit_retry(url=url, json=body, timeout=90)
+    response = _post_with_rate_limit_retry(url=url, json=body, timeout=timeout)
     data = response.json()
     return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
-def _ollama_vision(system_prompt: str, user_content: str, image_b64: str, max_tokens: int = 900) -> str:
+def _ollama_vision(
+    system_prompt: str,
+    user_content: str,
+    image_b64: str,
+    max_tokens: int = 900,
+    timeout: int = 120,
+) -> str:
     from apps.analytics.ai_settings import ollama_resolve_vision_model, _ollama_active_base
 
     model = ollama_resolve_vision_model()
@@ -920,7 +992,7 @@ def _ollama_vision(system_prompt: str, user_content: str, image_b64: str, max_to
         "stream": False,
         "options": {"num_predict": max_tokens},
     }
-    response = requests.post(url, json=payload, timeout=120)
+    response = requests.post(url, json=payload, timeout=timeout)
     response.raise_for_status()
     return response.json()["message"]["content"]
 

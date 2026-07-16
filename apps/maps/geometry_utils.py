@@ -146,6 +146,144 @@ def geometry_area_km2(geometry: dict[str, Any] | None) -> float:
     return 0.0
 
 
+def _ring_vertices_inside_circle(
+    ring: list[list[float]],
+    center_lat: float,
+    center_lng: float,
+    radius_km: float,
+) -> bool:
+    if len(ring) < 3:
+        return False
+    for point in ring[:-1] if ring[0] == ring[-1] else ring:
+        if haversine_km(center_lat, center_lng, float(point[1]), float(point[0])) > radius_km + 1e-6:
+            return False
+    return True
+
+
+def _circle_inside_polygon(
+    center_lat: float,
+    center_lng: float,
+    radius_km: float,
+    geometry: dict[str, Any],
+    *,
+    samples: int = 24,
+) -> bool:
+    """True when the analysis circle lies entirely inside the polygon."""
+    if not point_in_geometry(center_lng, center_lat, geometry):
+        return False
+    if radius_km <= 0:
+        return True
+    for i in range(samples):
+        bearing = (2.0 * math.pi * i) / samples
+        # Local ENU offset ≈ km on sphere for small radii.
+        dlat = (radius_km / 111.0) * math.cos(bearing)
+        dlng = (radius_km / (111.0 * max(0.2, math.cos(math.radians(center_lat))))) * math.sin(
+            bearing
+        )
+        if not point_in_geometry(center_lng + dlng, center_lat + dlat, geometry):
+            return False
+    return True
+
+
+def _sample_circle_polygon_intersection_km2(
+    geometry: dict[str, Any],
+    center_lat: float,
+    center_lng: float,
+    radius_km: float,
+    *,
+    grid: int = 40,
+) -> float:
+    """Estimate polygon ∩ circle area via a uniform grid over the overlapping bbox."""
+    bbox = geometry_bbox(geometry)
+    if not bbox or radius_km <= 0:
+        return 0.0
+
+    lat_delta = radius_km / 111.0
+    lng_delta = radius_km / (111.0 * max(0.2, math.cos(math.radians(center_lat))))
+    min_lat = max(bbox[0], center_lat - lat_delta)
+    max_lat = min(bbox[1], center_lat + lat_delta)
+    min_lng = max(bbox[2], center_lng - lng_delta)
+    max_lng = min(bbox[3], center_lng + lng_delta)
+    if min_lat >= max_lat or min_lng >= max_lng:
+        return 0.0
+
+    hits = 0
+    total = 0
+    d_lat = (max_lat - min_lat) / grid
+    d_lng = (max_lng - min_lng) / grid
+    for i in range(grid):
+        la = min_lat + (i + 0.5) * d_lat
+        for j in range(grid):
+            lo = min_lng + (j + 0.5) * d_lng
+            total += 1
+            if haversine_km(center_lat, center_lng, la, lo) > radius_km:
+                continue
+            if point_in_geometry(lo, la, geometry):
+                hits += 1
+
+    if total == 0 or hits == 0:
+        return 0.0
+
+    mid_lat = (min_lat + max_lat) / 2.0
+    height_km = (max_lat - min_lat) * 111.0
+    width_km = (max_lng - min_lng) * 111.0 * max(0.2, math.cos(math.radians(mid_lat)))
+    return (height_km * width_km) * (hits / total)
+
+
+def geometry_area_in_circle_km2(
+    geometry: dict[str, Any] | None,
+    center_lat: float,
+    center_lng: float,
+    radius_km: float,
+) -> float:
+    """
+    Geodesic area (km²) of Polygon/MultiPolygon intersecting a circular analysis zone.
+
+    Map-click insights previously summed full licence polygons whenever they merely
+    touched the zone, which inflated totals far beyond the ~10 km² search area.
+    """
+    if not geometry or radius_km <= 0:
+        return 0.0
+
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates")
+    if not coords:
+        return 0.0
+
+    if gtype == "MultiPolygon":
+        return sum(
+            geometry_area_in_circle_km2(
+                {"type": "Polygon", "coordinates": poly},
+                center_lat,
+                center_lng,
+                radius_km,
+            )
+            for poly in coords
+        )
+
+    if gtype != "Polygon":
+        return 0.0
+
+    full = geometry_area_km2(geometry)
+    if full <= 0:
+        return 0.0
+
+    exterior = coords[0]
+    if _ring_vertices_inside_circle(exterior, center_lat, center_lng, radius_km):
+        # Also keep holes: if the whole exterior is inside the circle, full area is correct.
+        return full
+
+    circle_area = math.pi * radius_km * radius_km
+    if _circle_inside_polygon(center_lat, center_lng, radius_km, geometry):
+        return circle_area
+
+    estimated = _sample_circle_polygon_intersection_km2(
+        geometry, center_lat, center_lng, radius_km
+    )
+    # Never report more than the smaller of full polygon / circle.
+    return max(0.0, min(estimated, full, circle_area))
+
+
 def bbox_intersects_click(
     bbox: tuple[float, float, float, float],
     lat: float,

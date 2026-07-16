@@ -24,7 +24,11 @@ class User(AbstractUser):
 
     @property
     def is_admin_user(self):
-        return self.role in (self.Role.SUPER_ADMIN, self.Role.ADMIN)
+        """Platform admins always have full product privileges."""
+        if self.role in (self.Role.SUPER_ADMIN, self.Role.ADMIN):
+            return True
+        # Django createsuperuser / staff flags without a Terra role still count.
+        return bool(getattr(self, "is_superuser", False))
 
     @property
     def is_mineral_manager(self):
@@ -32,7 +36,7 @@ class User(AbstractUser):
 
     @property
     def has_paid_access(self):
-        if self.role in (self.Role.SUPER_ADMIN, self.Role.ADMIN):
+        if self.is_admin_user:
             return True
         today = timezone.now().date()
         from django.conf import settings
@@ -47,6 +51,27 @@ class User(AbstractUser):
         if not getattr(settings, "PAYMENTS_SIMULATE", False):
             qs = qs.exclude(payment_orders__payment_provider="simulated")
         return qs.distinct().exists()
+
+    def get_active_paid_subscription(self):
+        """Return the current paid subscription, or None."""
+        if self.is_admin_user:
+            return None
+        if not self.has_paid_access:
+            return None
+        from apps.reports.access import _active_paid_subscription
+
+        return _active_paid_subscription(self)
+
+    @property
+    def can_use_analytics(self):
+        """Analytics / hotspots: Plus and Pro only (not Starter / Explorer)."""
+        if self.is_admin_user or self.role == self.Role.MINERAL_MANAGER:
+            return True
+        sub = self.get_active_paid_subscription()
+        if not sub:
+            return False
+        # Plus/Pro include saved explorations; Starter does not.
+        return bool(getattr(sub.plan, "includes_saved_explorations", False))
 
     @property
     def can_save_explorations(self):

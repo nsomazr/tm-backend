@@ -138,3 +138,72 @@ class BoundaryGeologyDocument(models.Model):
 
     def __str__(self):
         return f"{self.title} ({self.boundary.name})"
+
+
+class GeoReference(models.Model):
+    """
+    Admin-only geological reference datasets (shapefile / GeoJSON uploads).
+
+    Used privately to improve Ask Terra insights. Never exposed on the public map
+    or mentioned to normal users.
+    """
+
+    name = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=220, unique=True)
+    country = models.ForeignKey(
+        Country,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="geo_references",
+    )
+    source_file = models.FileField(upload_to="geo_references/", blank=True)
+    source_filename = models.CharField(max_length=255, blank=True)
+    feature_count = models.PositiveIntegerField(default=0)
+    bounds = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Bounding box: {"west", "south", "east", "north"}',
+    )
+    is_active = models.BooleanField(default=True)
+    uploaded_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="geo_reference_uploads",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "geo reference"
+        verbose_name_plural = "geo references"
+
+    def __str__(self):
+        return self.name
+
+
+class GeoReferenceFeature(models.Model):
+    geo_reference = models.ForeignKey(
+        GeoReference,
+        on_delete=models.CASCADE,
+        related_name="features",
+    )
+    geometry = models.JSONField()
+    properties = models.JSONField(default=dict, blank=True)
+    label = models.CharField(max_length=255, blank=True)
+    # Stored bbox so MySQL can filter without sorting/loading huge geometry JSON.
+    min_lng = models.FloatField(null=True, blank=True, db_index=True)
+    min_lat = models.FloatField(null=True, blank=True, db_index=True)
+    max_lng = models.FloatField(null=True, blank=True, db_index=True)
+    max_lat = models.FloatField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        # No default ordering: ORDER BY on rows with large JSON geometries blows
+        # MySQL sort_buffer (error 1038) on geojson / near-point scans.
+        ordering = []
+
+    def __str__(self):
+        return self.label or f"Feature {self.pk}"

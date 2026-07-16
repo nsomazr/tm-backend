@@ -177,6 +177,22 @@ class PublicListingGeoJsonView(APIView):
             geom = listing.geometry or {}
             if not geom:
                 continue
+            primary = (listing.primary_mineral or "").strip()
+            labels = list(listing.commodity_labels or [])
+            if not primary and labels:
+                primary = str(labels[0])
+            others = list(listing.other_minerals or [])
+            if not others and len(labels) > 1:
+                others = [str(item) for item in labels[1:]]
+            color = "#0f766e"
+            try:
+                from apps.minerals.geological_colors import match_geological_color
+
+                matched = match_geological_color(primary) if primary else None
+                if matched:
+                    color = matched
+            except Exception:
+                pass
             features.append(
                 {
                     "type": "Feature",
@@ -189,8 +205,10 @@ class PublicListingGeoJsonView(APIView):
                         "summary": listing.summary,
                         "geometry_type": geom.get("type"),
                         "buffer_km": listing.buffer_km,
-                        "commodity_labels": listing.commodity_labels or [],
-                        "color": "#0f766e",
+                        "commodity_labels": labels,
+                        "primary_mineral": primary,
+                        "other_minerals": others,
+                        "color": color,
                     },
                 }
             )

@@ -1,5 +1,6 @@
 import json
 
+from django.core.cache import cache
 from rest_framework import serializers
 
 from apps.maps.localization import get_request_locale, localized_name
@@ -7,6 +8,7 @@ from apps.minerals.models import Mineral
 
 from apps.minerals.color_utils import enrich_layer_style
 
+from .geometry_utils import geometry_area_km2
 from .models import (
     BUFFER_KM_MAX,
     BUFFER_KM_MIN,
@@ -131,11 +133,35 @@ class MapFeatureSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
+def _cached_layer_area_km2(layer: MapLayer) -> float:
+    """Total polygon coverage (km²) for stack ordering; 0 for non-polygon layers."""
+    if layer.layer_type != MapLayer.LayerType.POLYGON:
+        return 0.0
+    cache_key = f"map_layer_area_km2:v1:{layer.pk}:{layer.current_version}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        try:
+            return float(cached)
+        except (TypeError, ValueError):
+            pass
+    total = 0.0
+    for geometry in (
+        MapFeature.objects.filter(layer_id=layer.pk, is_active=True)
+        .values_list("geometry", flat=True)
+        .iterator(chunk_size=256)
+    ):
+        total += geometry_area_km2(geometry)
+    total = round(max(0.0, total), 2)
+    cache.set(cache_key, total, 60 * 60)
+    return total
+
+
 class MapLayerSerializer(serializers.ModelSerializer):
     mineral_name = serializers.SerializerMethodField()
     mineral_slug = serializers.CharField(source="mineral.slug", read_only=True)
     region_name = serializers.CharField(source="region.name", read_only=True, default=None)
     feature_count = serializers.SerializerMethodField()
+    area_km2 = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
     last_uploaded_by_name = serializers.SerializerMethodField()
     last_uploaded_at = serializers.SerializerMethodField()
@@ -169,6 +195,7 @@ class MapLayerSerializer(serializers.ModelSerializer):
             "associated_catalog_slugs",
             "current_version",
             "feature_count",
+            "area_km2",
             "created_by",
             "created_by_name",
             "last_uploaded_by_name",
@@ -194,6 +221,9 @@ class MapLayerSerializer(serializers.ModelSerializer):
             if value is not None:
                 return value
         return obj.features.filter(is_active=True).count()
+
+    def get_area_km2(self, obj):
+        return _cached_layer_area_km2(obj)
 
     def get_mineral_name(self, obj):
         locale = get_request_locale(self.context.get("request"))

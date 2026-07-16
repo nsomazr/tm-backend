@@ -8,6 +8,9 @@ from .views import (
     AdminBoundaryImportView,
     AdminBoundaryItemsView,
     AdminBoundaryListView,
+    AdminGeoReferenceDetailView,
+    AdminGeoReferenceGeoJsonView,
+    AdminGeoReferenceListCreateView,
     CountryViewSet,
     RegionViewSet,
 )
@@ -39,6 +42,26 @@ urlpatterns = [
         "admin/boundaries/<int:boundary_id>/geology/documents/<int:document_id>/",
         AdminBoundaryGeologyDocumentView.as_view(),
         name="admin-boundary-geology-document-delete",
+    ),
+    path(
+        "admin/geo-references/",
+        AdminGeoReferenceListCreateView.as_view(),
+        name="admin-geo-reference-list",
+    ),
+    path(
+        "admin/geo-references/geojson/",
+        AdminGeoReferenceGeoJsonView.as_view(),
+        name="admin-geo-reference-geojson-all",
+    ),
+    path(
+        "admin/geo-references/<int:pk>/",
+        AdminGeoReferenceDetailView.as_view(),
+        name="admin-geo-reference-detail",
+    ),
+    path(
+        "admin/geo-references/<int:pk>/geojson/",
+        AdminGeoReferenceGeoJsonView.as_view(),
+        name="admin-geo-reference-geojson",
     ),
     path("", include(router.urls)),
 ]

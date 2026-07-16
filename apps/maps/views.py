@@ -6,7 +6,7 @@ from django.db.models import Count, Prefetch, Q
 from django.http import HttpResponse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAuthenticatedOrReadOnly
 from rest_framework.response import Response
@@ -15,8 +15,11 @@ from apps.accounts.models import User
 from apps.accounts.permissions import IsAdminUser, IsMineralManagerOrAdmin
 from apps.accounts.throttling import AdminUploadThrottle, MapGeojsonAnonThrottle
 from apps.compliance.views import log_audit
-from apps.minerals.permissions import get_managed_mineral_ids, user_can_manage_mineral
-
+from apps.minerals.permissions import (
+    assert_manager_point_layer_access,
+    get_managed_mineral_ids,
+    user_can_manage_mineral,
+)
 from .access import (
     coarsen_geometry,
     filter_layers_for_user,
@@ -201,6 +204,10 @@ class MapLayerViewSet(viewsets.ModelViewSet):
             from rest_framework.exceptions import PermissionDenied
 
             raise PermissionDenied("Not allowed to create layers for this mineral.")
+        assert_manager_point_layer_access(
+            self.request.user,
+            layer_type=serializer.validated_data.get("layer_type"),
+        )
         base = slug
         while MapLayer.objects.filter(mineral=mineral, slug=slug).exists():
             slug = f"{base}-{counter}"
@@ -225,6 +232,13 @@ class MapLayerViewSet(viewsets.ModelViewSet):
             from rest_framework.exceptions import PermissionDenied
 
             raise PermissionDenied("Not allowed to update layers for this mineral.")
+        instance = serializer.instance
+        assert_manager_point_layer_access(self.request.user, layer=instance)
+        if "layer_type" in serializer.validated_data:
+            assert_manager_point_layer_access(
+                self.request.user,
+                layer_type=serializer.validated_data.get("layer_type"),
+            )
         layer = serializer.save()
         log_audit(
             self.request,
@@ -315,6 +329,10 @@ class MapLayerViewSet(viewsets.ModelViewSet):
         layer = self.get_object()
         if not user_can_manage_mineral(request.user, layer.mineral_id):
             return Response({"detail": "Not allowed."}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            assert_manager_point_layer_access(request.user, layer=layer)
+        except PermissionDenied as exc:
+            return Response({"detail": str(exc.detail)}, status=status.HTTP_403_FORBIDDEN)
 
         upload_file = request.FILES.get("file")
         if not upload_file:
@@ -408,6 +426,10 @@ class MapLayerViewSet(viewsets.ModelViewSet):
             layer = layers_by_id[layer_id]
             if not user_can_manage_mineral(request.user, layer.mineral_id):
                 return Response({"detail": "Not allowed to reorder one or more layers."}, status=status.HTTP_403_FORBIDDEN)
+            try:
+                assert_manager_point_layer_access(request.user, layer=layer)
+            except PermissionDenied as exc:
+                return Response({"detail": str(exc.detail)}, status=status.HTTP_403_FORBIDDEN)
         with transaction.atomic():
             for index, layer_id in enumerate(layer_ids):
                 MapLayer.objects.filter(id=layer_id).update(z_index=index)
@@ -432,11 +454,27 @@ class MapFeatureViewSet(viewsets.ModelViewSet):
         if not user_can_manage_mineral(self.request.user, layer.mineral_id):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("Cannot manage features for this mineral.")
+        assert_manager_point_layer_access(self.request.user, layer=layer)
         feature = serializer.save(created_by=self.request.user)
         if not layer.is_active:
             layer.is_active = True
             layer.save(update_fields=["is_active"])
         return feature
+
+    def perform_update(self, serializer):
+        layer = serializer.validated_data.get("layer") or serializer.instance.layer
+        if not user_can_manage_mineral(self.request.user, layer.mineral_id):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Cannot manage features for this mineral.")
+        assert_manager_point_layer_access(self.request.user, layer=layer)
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if not user_can_manage_mineral(self.request.user, instance.layer.mineral_id):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Cannot manage features for this mineral.")
+        assert_manager_point_layer_access(self.request.user, layer=instance.layer)
+        instance.delete()
 
 
 class LayerVersionViewSet(viewsets.ReadOnlyModelViewSet):

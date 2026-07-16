@@ -33,7 +33,17 @@ class MarketplaceListing(models.Model):
     commodity_labels = models.JSONField(
         default=list,
         blank=True,
-        help_text="Free-text commodity tags shown on the listing.",
+        help_text="Derived display tags: primary_mineral first, then other_minerals.",
+    )
+    primary_mineral = models.CharField(
+        max_length=80,
+        blank=True,
+        help_text="Main commodity for this listing (legend / map emphasis).",
+    )
+    other_minerals = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Additional commodities available on the property.",
     )
     status = models.CharField(
         max_length=20,
