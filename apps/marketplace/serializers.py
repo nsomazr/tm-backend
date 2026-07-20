@@ -378,6 +378,7 @@ class ListingInquirySerializer(serializers.ModelSerializer):
     listing_title = serializers.CharField(source="listing.title", read_only=True)
     listing_slug = serializers.CharField(source="listing.slug", read_only=True)
     from_username = serializers.CharField(source="from_user.username", read_only=True)
+    conversation_id = serializers.SerializerMethodField()
 
     class Meta:
         model = ListingInquiry
@@ -392,5 +393,15 @@ class ListingInquirySerializer(serializers.ModelSerializer):
             "contact_email",
             "is_read",
             "created_at",
+            "conversation_id",
         )
         read_only_fields = fields
+
+    def get_conversation_id(self, obj: ListingInquiry) -> int | None:
+        from .models import ListingConversation
+
+        conversation = ListingConversation.objects.filter(
+            listing_id=obj.listing_id,
+            buyer_id=obj.from_user_id,
+        ).only("id").first()
+        return conversation.id if conversation else None

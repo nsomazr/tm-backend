@@ -144,6 +144,99 @@ class ListingInquiry(models.Model):
         return f"Inquiry on {self.listing_id} from {self.from_user_id}"
 
 
+class ListingConversation(models.Model):
+    """Thread between two registered users, optionally tied to a listing."""
+
+    class Origin(models.TextChoices):
+        MARKETPLACE_INQUIRY = "marketplace_inquiry", "Marketplace inquiry"
+        LISTING_MESSAGE = "listing_message", "Listing message"
+        OWNER_OUTREACH = "owner_outreach", "Owner outreach"
+        DIRECT = "direct", "Direct message"
+
+    listing = models.ForeignKey(
+        MarketplaceListing,
+        on_delete=models.CASCADE,
+        related_name="conversations",
+        null=True,
+        blank=True,
+    )
+    owner_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="marketplace_conversations_as_owner",
+    )
+    buyer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="marketplace_conversations_as_buyer",
+    )
+    buyer_contact_email = models.EmailField(blank=True)
+    origin = models.CharField(
+        max_length=32,
+        choices=Origin.choices,
+        default=Origin.DIRECT,
+    )
+    owner_last_read_at = models.DateTimeField(null=True, blank=True)
+    buyer_last_read_at = models.DateTimeField(null=True, blank=True)
+    owner_archived_at = models.DateTimeField(null=True, blank=True)
+    buyer_archived_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["listing", "buyer"],
+                name="uniq_listing_buyer_conversation",
+                condition=models.Q(listing__isnull=False),
+            ),
+            models.UniqueConstraint(
+                fields=["owner_user", "buyer"],
+                name="uniq_direct_user_conversation",
+                condition=models.Q(listing__isnull=True),
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["listing", "updated_at"]),
+            models.Index(fields=["buyer", "updated_at"]),
+        ]
+
+    def __str__(self):
+        return f"Conversation {self.pk} · listing {self.listing_id} · buyer {self.buyer_id}"
+
+
+class ListingMessage(models.Model):
+    conversation = models.ForeignKey(
+        ListingConversation,
+        on_delete=models.CASCADE,
+        related_name="messages",
+    )
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="marketplace_messages_sent",
+    )
+    body = models.TextField()
+    reply_to = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="replies",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["conversation", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"Message {self.pk} in conversation {self.conversation_id}"
+
+
 class ListingEvent(models.Model):
     class Kind(models.TextChoices):
         VIEW = "view", "View"

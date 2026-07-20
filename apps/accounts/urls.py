@@ -10,6 +10,12 @@ from .views import (
     SendOTPView,
     VerifyOTPView,
 )
+from .notification_views import (
+    NotificationListView,
+    NotificationMarkAllReadView,
+    NotificationMarkReadView,
+    NotificationUnreadCountView,
+)
 
 urlpatterns = [
     path("register/", RegisterView.as_view(), name="register"),
@@ -20,4 +26,8 @@ urlpatterns = [
     path("refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("me/", MeView.as_view(), name="me"),
     path("complete-profile/", CompleteProfileView.as_view(), name="complete-profile"),
+    path("notifications/", NotificationListView.as_view(), name="notifications"),
+    path("notifications/unread-count/", NotificationUnreadCountView.as_view(), name="notifications-unread-count"),
+    path("notifications/read-all/", NotificationMarkAllReadView.as_view(), name="notifications-read-all"),
+    path("notifications/<int:pk>/read/", NotificationMarkReadView.as_view(), name="notification-read"),
 ]

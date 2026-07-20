@@ -10,6 +10,17 @@ from django.conf import settings
 
 from .report_text_utils import filter_report_findings, normalize_section_heading
 
+try:
+    from apps.analytics.map_report_format import (
+        MAP_INSIGHT_STRUCTURE_INSTRUCTION,
+        normalize_map_insight_terminology,
+    )
+except ImportError:  # pragma: no cover - import guard for isolated report tests
+    MAP_INSIGHT_STRUCTURE_INSTRUCTION = ""
+
+    def normalize_map_insight_terminology(text: str) -> str:
+        return text
+
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
@@ -58,44 +69,33 @@ def _post_with_rate_limit_retry(**kwargs):
 
 MAP_INSIGHT_PROMPT = (
     "You are Terra Meta's senior exploration geologist. "
-    "Using ONLY the mapped data in the user message, write 3 concise paragraphs "
-    "(roughly 160-240 words) for mineral explorers and investors. "
-    "Cover: location and analysis scope; mapped point occurrences and polygon mineral areas "
-    "with exact counts (occurrence = point feature only); "
-    "compass-direction clustering when sector counts are provided; "
-    "structure orientations when provided; brief implications and next field steps; data limits. "
-    "Write flowing geological prose in natural paragraphs. Do not use bullet lists or markdown headings. "
-    "Use **bold** sparingly for mineral and region names only. "
+    "Using ONLY the mapped data in the user message, write a structured area exploration brief "
+    "for mineral explorers and investors. "
+    + MAP_INSIGHT_STRUCTURE_INSTRUCTION
+    + " Cover exact occurrence and polygon counts, compass-direction clustering when provided, "
+    "structure orientations when provided, and data limits. "
     "If minerals are listed in the analysis area, describe them; never claim there are no mapped areas. "
     "Use the word occurrence only for mapped point features; call polygons mineral areas or coverage. "
-    "When compass distribution data is included, describe how areas lie north/south/east/west of the "
-    "analysis center only when supported by the counts. "
-    "When structure orientation data is included, describe dominant trends using only those counts; "
-    "do not invent fold axes, fault sense, or dip. "
-    "When geological reference from administrative boundaries is included, integrate it briefly. "
-    "When terrain elevation metrics are included, describe surface relief only; "
-    "do not equate lowland with sedimentary basins unless geological reference supports it. "
+    "Call mapped line-type geological features structures; never use the word lines for them. "
     "Use only administrative names and geography provided; do not invent coastlines, reserves, "
     "drill intercepts, or deposit models not supported by the data."
 )
 
 TERRAIN_VISUAL_INSIGHT_PROMPT = (
     "You are Terra Meta's senior exploration geologist with access to a map screenshot and "
-    "structured exploration data. Using ONLY the image and text context provided, write 3 "
-    "concise paragraphs (roughly 160-240 words) for mineral explorers and investors. "
-    "Describe visible landforms cautiously: ridges, valleys, drainage, vegetation, exposed rock, "
-    "and lineaments only when you can see them in the image. Cross-check visual observations "
-    "with mapped mineral counts, terrain elevation metrics, and geological reference text. "
+    "structured exploration data. Using ONLY the image and text context provided, write a "
+    "structured exploration brief for mineral explorers and investors. "
+    + MAP_INSIGHT_STRUCTURE_INSTRUCTION
+    + " Describe visible landforms cautiously in Snapshot / Figure when supported by the image. "
     "Mapped mineral data is authoritative for commodity presence and counts; the image is "
     "supplementary context. Never invent drill results, reserves, basin names, or deposit models. "
     "Do not claim sedimentary basin setting from low relief alone. "
-    "Write flowing geological prose in natural paragraphs without bullet lists or markdown headings. "
     "Use **bold** sparingly for mineral and region names only."
 )
 
 GEOLOGICAL_MAP_INSIGHT_PROMPT = MAP_INSIGHT_PROMPT
 
-MAP_INSIGHT_MAX_TOKENS = 520
+MAP_INSIGHT_MAX_TOKENS = 1400
 MAP_INSIGHT_HTTP_TIMEOUT = 45
 MAP_VISION_HTTP_TIMEOUT = 30
 
@@ -308,7 +308,9 @@ def generate_geological_map_insight(
         try:
             text = _call_geological_map_provider(provider, context)
             if text and text.strip():
-                return sanitize_assistant_output(text.strip()), _model_label(provider)
+                return normalize_map_insight_terminology(
+                    sanitize_assistant_output(text.strip())
+                ), _model_label(provider)
         except Exception as exc:
             logger.warning("Geological map insight provider %s failed: %s", provider, exc)
 
@@ -337,7 +339,9 @@ def generate_geological_map_insight(
                 else:
                     continue
                 if text and text.strip():
-                    return sanitize_assistant_output(text.strip()), _model_label(provider)
+                    return normalize_map_insight_terminology(
+                        sanitize_assistant_output(text.strip())
+                    ), _model_label(provider)
             except Exception as exc:
                 logger.warning("Vision map insight provider %s failed: %s", provider, exc)
 

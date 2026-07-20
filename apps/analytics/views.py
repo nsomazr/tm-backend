@@ -248,7 +248,7 @@ def _build_area_insights_response(request):
         payload["insight_tier"] = "full" if has_detail else "highlight"
         payload["assistant_credits"] = get_assistant_credit_quota(request, user)
     else:
-        payload["ai_insight"] = generate_unmapped_insight(lat, lng, locale=locale)
+        payload["ai_insight"] = generate_basic_map_insight(ctx, locale=locale)
         payload["insight_tier"] = "none"
 
     # Geo reference / boundary geology is admin-private: used for AI quality only.

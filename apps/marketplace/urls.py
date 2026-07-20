@@ -1,5 +1,17 @@
 from django.urls import path
 
+from .conversation_views import (
+    ConversationListingOptionsView,
+    ListingConversationForBuyerView,
+    MarketplaceUserSearchView,
+    MyConversationArchiveView,
+    MyConversationDetailView,
+    MyConversationListView,
+    MyConversationMarkReadView,
+    MyConversationMessageCreateView,
+    MyConversationMessageDeleteView,
+    StartConversationView,
+)
 from .views import (
     ListingDocumentCreateView,
     ListingDocumentDeleteView,
@@ -36,6 +48,11 @@ urlpatterns = [
         ListingInquiryCreateView.as_view(),
         name="marketplace-listing-inquiry",
     ),
+    path(
+        "listings/<slug:slug>/conversation/",
+        ListingConversationForBuyerView.as_view(),
+        name="marketplace-listing-conversation",
+    ),
     path("parse-geometry/", ParseListingGeometryView.as_view(), name="marketplace-parse-geometry"),
     path("my/analytics/", MyMarketplaceAnalyticsView.as_view(), name="marketplace-my-analytics"),
     path("my/listings/", MyListingListCreateView.as_view(), name="marketplace-my-listings"),
@@ -55,5 +72,38 @@ urlpatterns = [
         "my/inquiries/<int:pk>/read/",
         MyInquiryMarkReadView.as_view(),
         name="marketplace-my-inquiry-read",
+    ),
+    path("my/conversations/", MyConversationListView.as_view(), name="marketplace-my-conversations"),
+    path("my/conversations/start/", StartConversationView.as_view(), name="marketplace-start-conversation"),
+    path("users/search/", MarketplaceUserSearchView.as_view(), name="marketplace-user-search"),
+    path(
+        "users/conversation-listings/",
+        ConversationListingOptionsView.as_view(),
+        name="marketplace-conversation-listings",
+    ),
+    path(
+        "my/conversations/<int:pk>/",
+        MyConversationDetailView.as_view(),
+        name="marketplace-my-conversation-detail",
+    ),
+    path(
+        "my/conversations/<int:pk>/messages/",
+        MyConversationMessageCreateView.as_view(),
+        name="marketplace-my-conversation-messages",
+    ),
+    path(
+        "my/conversations/<int:pk>/messages/<int:message_id>/",
+        MyConversationMessageDeleteView.as_view(),
+        name="marketplace-my-conversation-message-delete",
+    ),
+    path(
+        "my/conversations/<int:pk>/archive/",
+        MyConversationArchiveView.as_view(),
+        name="marketplace-my-conversation-archive",
+    ),
+    path(
+        "my/conversations/<int:pk>/read/",
+        MyConversationMarkReadView.as_view(),
+        name="marketplace-my-conversation-read",
     ),
 ]

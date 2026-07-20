@@ -9,6 +9,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .conversation_service import send_listing_message
 from .geometry_upload import geometry_from_upload
 from .models import ListingDocument, ListingInquiry, MarketplaceListing
 from .serializers import (
@@ -320,16 +321,25 @@ class ListingInquiryCreateView(APIView):
         serializer = ListingInquiryCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         contact_email = serializer.validated_data.get("contact_email") or request.user.email or ""
-        inquiry = ListingInquiry.objects.create(
+        try:
+            conversation, message = send_listing_message(
+                listing=listing,
+                sender=request.user,
+                body=serializer.validated_data["message"],
+                buyer_contact_email=contact_email,
+                create_legacy_inquiry=True,
+            )
+        except ValueError as exc:
+            raise ValidationError({"detail": str(exc)}) from exc
+        inquiry = ListingInquiry.objects.filter(
             listing=listing,
             from_user=request.user,
-            message=serializer.validated_data["message"],
-            contact_email=contact_email,
-        )
-        return Response(
-            ListingInquirySerializer(inquiry).data,
-            status=status.HTTP_201_CREATED,
-        )
+            message=message.body,
+        ).order_by("-created_at").first()
+        payload = ListingInquirySerializer(inquiry).data if inquiry else {}
+        payload["conversation_id"] = conversation.id
+        payload["message_id"] = message.id
+        return Response(payload, status=status.HTTP_201_CREATED)
 
 
 class MyInquiryListView(generics.ListAPIView):

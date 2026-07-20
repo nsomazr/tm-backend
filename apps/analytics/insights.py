@@ -1234,7 +1234,7 @@ def _structure_orientation_summary_lines(
         if property_count:
             source_bits.append(f"{property_count} kutoka sifa")
         if geometry_count:
-            source_bits.append(f"{geometry_count} kutoka jiometri ya mistari")
+            source_bits.append(f"{geometry_count} kutoka jiometri ya miundo")
         if source_bits:
             lines.append(f"Chanzo: {', '.join(source_bits)}.")
     else:
@@ -1248,7 +1248,7 @@ def _structure_orientation_summary_lines(
         if property_count:
             source_bits.append(f"{property_count} from attributes")
         if geometry_count:
-            source_bits.append(f"{geometry_count} from line geometry")
+            source_bits.append(f"{geometry_count} from structure geometry")
         if source_bits:
             lines.append(f"Source: {', '.join(source_bits)}.")
 
@@ -1950,7 +1950,7 @@ def _commodity_summary_line(commodity: dict) -> str:
     if polygons:
         parts.append(f"{polygons} polygon area{'s' if polygons != 1 else ''}")
     if lines:
-        parts.append(f"{lines} structure line{'s' if lines != 1 else ''}")
+        parts.append(f"{lines} structure{'s' if lines != 1 else ''}")
     if not parts:
         total = int(commodity.get("count") or 0)
         parts.append(f"{total} mapped feature{'s' if total != 1 else ''}")
@@ -2057,7 +2057,7 @@ def build_area_ai_context(ctx: dict) -> str:
         direction_block += (
             "Describe spatial clustering using these compass directions when relevant. "
             "This is where mapped features lie relative to the analysis center — "
-            "not geological strike/trend of structure lines.\n"
+            "not geological strike/trend of structures.\n"
         )
     structure = ctx.get("structure_orientations") or {}
     structure_block = ""
@@ -2081,7 +2081,7 @@ def build_area_ai_context(ctx: dict) -> str:
         if structure.get("property_count") or structure.get("geometry_count"):
             structure_block += (
                 f"- sources: {int(structure.get('property_count') or 0)} attribute, "
-                f"{int(structure.get('geometry_count') or 0)} line geometry\n"
+                f"{int(structure.get('geometry_count') or 0)} structure geometry\n"
             )
         for entry in structure.get("by_mineral") or []:
             structure_block += (
@@ -2147,12 +2147,13 @@ def build_area_ai_context(ctx: dict) -> str:
         f"Minerals in this analysis area (mapped data only): {mineral_lines}\n"
         f"Point occurrences in this analysis area: {int(ctx.get('occurrence_count') or 0)}\n"
         f"Polygon mineral areas in this analysis area: {int(ctx.get('polygon_count') or 0)}\n"
-        f"Structure lines in this analysis area: {int(ctx.get('line_count') or 0)}\n"
+        f"Structures in this analysis area: {int(ctx.get('line_count') or 0)}\n"
         f"Total mapped features in this analysis area: {ctx['feature_count']}\n"
         f"{area_inside_line}"
         f"Terminology: 'occurrence' means a mapped point feature only; "
         f"polygon features are mineral areas/coverage, not occurrences; "
-        f"structure orientations are geological trends of mapped lines/attributes. "
+        f"structure orientations are geological trends of mapped structures/attributes; "
+        f"always say structures, never lines, for mapped line-type geological features. "
         f"Any km² values are the portion of polygons inside the analysis circle only.\n"
         f"Area labels: {labels}\n"
         f"Country: Tanzania\n"
@@ -2308,237 +2309,10 @@ def _insight_contradicts_mapped_data(text: str, ctx: dict) -> bool:
 
 
 def generate_basic_map_insight(ctx: dict, locale: str = "en") -> str:
-    """Rich geological exploration narrative from mapped features in the analysis scope."""
-    if not ctx.get("has_mapped_data"):
-        return generate_unmapped_insight(ctx["lat"], ctx["lng"], locale)
+    """Structured map-click report from mapped features in the analysis scope."""
+    from .map_report_format import build_map_report_markdown
 
-    minerals = ctx.get("minerals", [])
-    geo = ctx.get("geographic_region") or ctx.get("region") or ("Haijulikani" if locale == "sw" else "Unassigned")
-    location = _location_label(ctx, locale=locale)
-    admin_lines = _admin_hierarchy_lines(ctx, locale=locale)
-    zone_km2 = ctx.get("analysis_area_km2")
-    scope = ctx.get("insight_scope") or "analysis_zone"
-    feature_count = int(ctx.get("feature_count") or 0)
-    labels = ctx.get("labels") or []
-    lat, lng = ctx.get("lat"), ctx.get("lng")
-    paragraphs: list[str] = []
-
-    if locale == "sw":
-        opening = (
-            f"Muhtasari wa kijiolojia wa uchunguzi kwa **{location}**, mkoa wa **{geo}**, Tanzania. "
-            f"{_scope_narrative(scope, locale)}"
-        )
-        if zone_km2:
-            opening += f" Eneo la utafiti lina takriban **{zone_km2:,.0f} km²**."
-        if lat is not None and lng is not None:
-            opening += f" Kituo cha uchambuzi: {float(lat):.4f}, {float(lng):.4f}."
-        paragraphs.append(opening)
-
-        if admin_lines:
-            paragraphs.append(admin_lines)
-
-        coverage = (
-            f"Data iliyopangwa inaonyesha **{feature_count}** "
-            f"{'kipengele' if feature_count == 1 else 'vipengele'} ndani ya upeo huu"
-        )
-        occurrence_count = int(ctx.get("occurrence_count") or 0)
-        polygon_count = int(ctx.get("polygon_count") or 0)
-        if occurrence_count or polygon_count:
-            coverage += (
-                f" ({occurrence_count} "
-                f"{'tukio la nukta' if occurrence_count == 1 else 'matukio ya nukta'}, "
-                f"{polygon_count} "
-                f"{'eneo la poligoni' if polygon_count == 1 else 'maeneo ya poligoni'})"
-            )
-        if len(minerals) == 1:
-            m = minerals[0]
-            mname = m.get("name") or m.get("slug") or "Madini"
-            m_occ = int(m.get("occurrence_count") or 0)
-            m_poly = int(m.get("polygon_count") or 0)
-            coverage += f", likiwa na **{mname}** kama bidhaa kuu"
-            bits = []
-            if m_occ:
-                bits.append(f"{m_occ} {'tukio' if m_occ == 1 else 'matukio'} (nukta)")
-            if m_poly:
-                bits.append(f"{m_poly} {'poligoni' if m_poly == 1 else 'poligoni'}")
-            if bits:
-                coverage += f" ({', '.join(bits)}"
-                if m.get("area_km2"):
-                    coverage += f", **{float(m['area_km2']):,.2f} km²** ndani ya eneo la uchambuzi"
-                coverage += ")"
-            elif m.get("area_km2"):
-                coverage += f" (**{float(m['area_km2']):,.2f} km²** ndani ya eneo la uchambuzi)"
-            coverage += "). Matukio ni alama za nukta; poligoni ni maeneo ya uwezekano, si makadirio ya akiba."
-        else:
-            coverage += f", na **{len(minerals)}** aina za madini zilizotambuliwa."
-            coverage += (
-                " Matukio (occurrences) ni alama za nukta pekee; poligoni zinaonyesha maeneo ya uchunguzi, "
-                "si makadirio ya rasilimali."
-            )
-        paragraphs.append(coverage + ".")
-
-        if minerals:
-            commodity_bits = []
-            for m in minerals[:4]:
-                mname = m.get("name") or m.get("slug") or "Madini"
-                m_occ = int(m.get("occurrence_count") or 0)
-                m_poly = int(m.get("polygon_count") or 0)
-                detail_bits = []
-                if m_occ:
-                    detail_bits.append(f"{m_occ} {'tukio' if m_occ == 1 else 'matukio'}")
-                if m_poly:
-                    detail_bits.append(f"{m_poly} poligoni")
-                if not detail_bits:
-                    detail_bits.append(f"{int(m.get('count') or 0)} kipengele")
-                bit = f"**{mname}** ({', '.join(detail_bits)}"
-                if m.get("area_km2"):
-                    bit += f", {float(m['area_km2']):,.2f} km²"
-                bit += f"): {_mineral_exploration_notes(m.get('slug', ''), mname, locale)}"
-                commodity_bits.append(bit)
-            paragraphs.append(" ".join(commodity_bits))
-
-        if labels:
-            paragraphs.append(
-                f"Lebo za maeneo yaliyopangwa ni pamoja na: {', '.join(labels[:5])}. "
-                "Linganisha majina haya na hati za leseni na ramani za shamba."
-            )
-
-        for line in (ctx.get("direction_insights") or {}).get("summary_lines") or []:
-            paragraphs.append(line)
-
-        for line in (ctx.get("structure_orientations") or {}).get("summary_lines") or []:
-            paragraphs.append(line)
-
-        for line in (ctx.get("terrain_context") or {}).get("summary_lines") or []:
-            paragraphs.append(line)
-
-        # Geological reference / boundary geology stays admin-private (payload + UI),
-        # not baked into user-facing template insight text.
-
-        paragraphs.append(
-            "Hatua zinazopendekezwa: (1) ukaguzi wa leseni na mipaka ya ardhi; "
-            "(2) ramani ya shamba na sampuli za jeochemistry; (3) gridi za geophysiki inazohitajika; "
-            "(4) trenching au mashimo ya uchunguzi baada ya kuthibitisha lengo. "
-            "Ripoti hii inategemea tabaka zilizochapishwa kwenye Terra Meta na haijumuishi matokeo ya kuchimba wala makadirio ya akiba."
-        )
-    else:
-        opening = (
-            f"**Geological exploration summary** for **{location}** in the **{geo}** region, Tanzania. "
-            f"{_scope_narrative(scope, locale)}"
-        )
-        if zone_km2:
-            opening += f" The analysis covers approximately **{zone_km2:,.0f} km²** of ground."
-        if lat is not None and lng is not None:
-            opening += f" Reference coordinates: {float(lat):.5f}°N, {float(lng):.5f}°E."
-        paragraphs.append(opening)
-
-        if admin_lines:
-            paragraphs.append(admin_lines)
-
-        occurrence_count = int(ctx.get("occurrence_count") or 0)
-        polygon_count = int(ctx.get("polygon_count") or 0)
-
-        if feature_count == 1 and len(minerals) == 1:
-            m = minerals[0]
-            mname = m.get("name") or m.get("slug") or "Unknown"
-            m_occ = int(m.get("occurrence_count") or 0)
-            m_poly = int(m.get("polygon_count") or 0)
-            if m_occ and not m_poly:
-                coverage = (
-                    f"Terra Meta maps **{m_occ}** point occurrence for **{mname}** in this scope"
-                )
-            elif m_poly and not m_occ:
-                coverage = (
-                    f"Terra Meta maps **{m_poly}** mineral polygon area for **{mname}** in this scope"
-                )
-            else:
-                coverage = (
-                    f"Terra Meta maps **{mname}** in this scope "
-                    f"({m_occ} point occurrence{'s' if m_occ != 1 else ''}, "
-                    f"{m_poly} polygon area{'s' if m_poly != 1 else ''})"
-                )
-            if m.get("area_km2"):
-                coverage += f", with **{float(m['area_km2']):,.2f} km²** of mineral coverage inside the analysis area"
-            coverage += (
-                ". Point occurrences are discrete mapped locations; polygon areas outline exploration "
-                "targets from published platform layers. Neither is a resource estimate and both must "
-                "be validated with field geology, sampling, and geophysics."
-            )
-        else:
-            coverage = (
-                f"The mapped dataset records **{occurrence_count}** point occurrence"
-                f"{'' if occurrence_count == 1 else 's'} and **{polygon_count}** polygon mineral area"
-                f"{'' if polygon_count == 1 else 's'} "
-                f"across **{len(minerals)}** commodities in this area. "
-                "Use **occurrence** only for point features; polygon features are mineral areas, "
-                "not occurrences. These are exploration indicators from curated layers, not JORC/NI 43-101 resources."
-            )
-        paragraphs.append(coverage)
-
-        if minerals:
-            geo_bits = []
-            for m in minerals[:4]:
-                mname = m.get("name") or m.get("slug") or "Unknown"
-                m_occ = int(m.get("occurrence_count") or 0)
-                m_poly = int(m.get("polygon_count") or 0)
-                detail_bits = []
-                if m_occ:
-                    detail_bits.append(
-                        f"{m_occ} occurrence{'s' if m_occ != 1 else ''}"
-                    )
-                if m_poly:
-                    detail_bits.append(
-                        f"{m_poly} polygon area{'s' if m_poly != 1 else ''}"
-                    )
-                if not detail_bits:
-                    total = int(m.get("count") or 0)
-                    detail_bits.append(f"{total} feature{'s' if total != 1 else ''}")
-                lead = f"**{mname}** ({', '.join(detail_bits)}"
-                if m.get("area_km2"):
-                    lead += f", {float(m['area_km2']):,.2f} km² inside analysis area"
-                lead += f"): {_mineral_exploration_notes(m.get('slug', ''), mname, locale)}"
-                geo_bits.append(lead)
-            paragraphs.append(" ".join(geo_bits))
-
-        if labels:
-            paragraphs.append(
-                f"Mapped area labels include: {', '.join(labels[:5])}. "
-                "Cross-check these names against mining cadastre records and any available geological survey memoirs."
-            )
-
-        for line in (ctx.get("direction_insights") or {}).get("summary_lines") or []:
-            paragraphs.append(line)
-
-        for line in (ctx.get("structure_orientations") or {}).get("summary_lines") or []:
-            paragraphs.append(line)
-
-        for line in (ctx.get("terrain_context") or {}).get("summary_lines") or []:
-            paragraphs.append(line)
-
-        # Geological reference stays admin-private; do not include in public template text.
-
-        if feature_count <= 2:
-            paragraphs.append(
-                "With limited but focused coverage, this area suits a rank-1 desktop review followed by "
-                "a short field campaign: licence confirmation, structural mapping of the mapped footprint, "
-                "and infill geochemistry on a grid scaled to the mineral area size."
-            )
-        else:
-            paragraphs.append(
-                "Multiple mapped areas suggest a camp-scale review: prioritise targets by mineral area, "
-                "commodity mix, and access, then sequence ground programs from reconnaissance through "
-                "targeted geophysics and scout drilling."
-            )
-
-        paragraphs.append(
-            "Recommended work program: (1) tenure and environmental screening; (2) geological mapping and "
-            "lithostructural interpretation of each mineral area; (3) soil or rock-chip geochemistry and "
-            "commodity-appropriate geophysics; (4) trenching or drill testing of the strongest targets. "
-            "This insight is generated from Terra Meta mapped layers only and does not include drill "
-            "intercepts, resource models, or economic studies."
-        )
-
-    return "\n\n".join(paragraphs)
+    return build_map_report_markdown(ctx, locale=locale)
 
 
 def build_platform_ai_context(locale: str = "en") -> str:

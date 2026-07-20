@@ -45,7 +45,7 @@ _BASEMAP_META: dict[str, dict[str, str]] = {
         "description": "Esri world imagery",
         "hint_en": (
             "The user is viewing satellite imagery. Describe visible land cover, drainage "
-            "patterns, lineaments, and exposed rock only when supported by the image or "
+            "patterns, structures, and exposed rock only when supported by the image or "
             "terrain data. Do not invent basin names or deposit types."
         ),
         "hint_sw": (

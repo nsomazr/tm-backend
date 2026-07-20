@@ -23,7 +23,11 @@ from apps.maps.models import MapFeature
 from apps.reports.ai_service import generate_export_narrative_text, sanitize_report_text
 from apps.reports.pdf_service import _brand_logo_path, _wordmark_path
 
-from .map_snapshot_server import generate_server_map_snapshot
+from .map_report_format import (
+    MAP_REPORT_SECTIONS,
+    build_map_report_sections,
+    parse_map_report_markdown,
+)
 from .coverage_stats import build_feature_coverage_stats
 from .insights import (
     area_location_context,
@@ -309,6 +313,15 @@ def _is_section_heading(line: str) -> bool:
         return True
     known = {
         "executive summary",
+        "geological information",
+        "geology",
+        "results / findings",
+        "results and findings",
+        "logistics",
+        "snapshot / figure",
+        "snapshot",
+        "recommendation",
+        "conclusion",
         "mineral coverage",
         "minerals covered",
         "regional distribution",
@@ -1124,7 +1137,7 @@ def _gather_map_export_data(
                 }
             ]
 
-    return {
+    data = {
         "mode": "map",
         "title": f"Terra Meta Area Brief — {location_name}",
         "subtitle": _export_subtitle(ctx, exploration_geometry=exploration_geometry),
@@ -1158,6 +1171,12 @@ def _gather_map_export_data(
         "exploration_geometry": exploration_geometry,
         "admin": admin,
     }
+    assessment = (data.get("site_assessment") or "").strip()
+    if assessment:
+        parsed_title = parse_map_report_markdown(assessment).get("Title")
+        if parsed_title:
+            data["title"] = parsed_title
+    return data
 
 
 def gather_insight_export_data(
@@ -1366,6 +1385,77 @@ def _minerals_table(minerals: list[dict]) -> Table | None:
     return table
 
 
+def _append_standard_map_report(
+    story: list,
+    data: dict[str, Any],
+    *,
+    map_snapshot: bytes | None,
+    section_style: ParagraphStyle,
+    subsection_style: ParagraphStyle,
+    body_style: ParagraphStyle,
+    meta_style: ParagraphStyle,
+    include_snapshot: bool,
+) -> None:
+    """Render map exports in the fixed Terra Meta section order."""
+    parsed = parse_map_report_markdown((data.get("site_assessment") or "").strip())
+    if not parsed or len(parsed) < 3:
+        ctx = {
+            "has_mapped_data": bool(data.get("minerals") or data.get("feature_count")),
+            "minerals": data.get("minerals") or [],
+            "feature_count": data.get("feature_count") or 0,
+            "occurrence_count": sum(int(m.get("occurrence_count") or 0) for m in (data.get("minerals") or [])),
+            "polygon_count": sum(int(m.get("polygon_count") or 0) for m in (data.get("minerals") or [])),
+            "analysis_area_km2": data.get("analysis_area_km2"),
+            "insight_scope": data.get("insight_scope"),
+            "labels": data.get("labels") or [],
+            "lat": data.get("lat"),
+            "lng": data.get("lng"),
+            "geographic_region": data.get("geographic_region"),
+            "region": data.get("geographic_region"),
+            "direction_insights": data.get("direction_insights"),
+            "structure_orientations": data.get("structure_orientations"),
+            "region_boundary": {"name": (data.get("admin") or {}).get("region")},
+            "district_boundary": {"name": (data.get("admin") or {}).get("district")},
+            "ward_boundary": {"name": (data.get("admin") or {}).get("ward")},
+            "village_boundary": {"name": (data.get("admin") or {}).get("village")},
+        }
+        parsed = build_map_report_sections(ctx, locale="en")
+
+    for section_name in MAP_REPORT_SECTIONS:
+        body = (parsed.get(section_name) or "").strip()
+        story.append(_wrap_text(section_name, section_style))
+        if section_name == "Snapshot / Figure" and include_snapshot:
+            if map_snapshot:
+                try:
+                    story.append(
+                        _snapshot_image(
+                            map_snapshot,
+                            max_width=6.5 * inch,
+                            max_height=5.2 * inch,
+                        )
+                    )
+                    story.append(Spacer(1, 0.12 * inch))
+                except Exception as exc:
+                    logger.warning("Map snapshot embed failed: %s", exc)
+                    story.append(_wrap_text("Map snapshot could not be embedded.", meta_style))
+            else:
+                story.append(
+                    _wrap_text(
+                        "Map snapshot is unavailable for this location. Try exporting again from the map page.",
+                        meta_style,
+                    )
+                )
+        if body:
+            _append_markdown_narrative(
+                story,
+                body,
+                section_style=section_style,
+                subsection_style=subsection_style,
+                body_style=body_style,
+            )
+        story.append(Spacer(1, 0.06 * inch))
+
+
 def build_insight_export_pdf(
     data: dict[str, Any],
     *,
@@ -1462,7 +1552,18 @@ def build_insight_export_pdf(
         )
     )
 
-    if data.get("mode") == "map":
+    if data.get("mode") == "map" and "overview" in sections:
+        _append_standard_map_report(
+            story,
+            data,
+            map_snapshot=resolved_snapshot,
+            section_style=section_style,
+            subsection_style=subsection_style,
+            body_style=body_style,
+            meta_style=meta_style,
+            include_snapshot="map_snapshot" in sections,
+        )
+    elif data.get("mode") == "map":
         _append_location_summary(
             story,
             data,
@@ -1470,8 +1571,31 @@ def build_insight_export_pdf(
             body_style=body_style,
             meta_style=meta_style,
         )
+        if "map_snapshot" in sections:
+            story.append(_wrap_text("Location snapshot", section_style))
+            story.append(Spacer(1, 0.22 * inch))
+            if resolved_snapshot:
+                try:
+                    story.append(
+                        _snapshot_image(
+                            resolved_snapshot,
+                            max_width=6.5 * inch,
+                            max_height=5.2 * inch,
+                        )
+                    )
+                    story.append(Spacer(1, 0.15 * inch))
+                except Exception as exc:
+                    logger.warning("Map snapshot embed failed: %s", exc)
+                    story.append(_wrap_text("Map snapshot could not be embedded.", meta_style))
+            else:
+                story.append(
+                    _wrap_text(
+                        "Map snapshot is unavailable for this location. Try exporting again from the map page.",
+                        meta_style,
+                    )
+                )
 
-    if "map_snapshot" in sections:
+    if "map_snapshot" in sections and not (data.get("mode") == "map" and "overview" in sections):
         story.append(_wrap_text("Location snapshot", section_style))
         story.append(Spacer(1, 0.22 * inch))
         if resolved_snapshot:
@@ -1495,8 +1619,17 @@ def build_insight_export_pdf(
                 )
             )
 
-    if "overview" in sections:
-        if data.get("mode") == "map":
+    if "overview" in sections and data.get("mode") != "map":
+        ai_narrative = (narrative or "").strip()
+        if ai_narrative and _narrative_looks_valid(ai_narrative, data):
+            _append_markdown_narrative(
+                story,
+                ai_narrative,
+                section_style=section_style,
+                subsection_style=subsection_style,
+                body_style=body_style,
+            )
+        else:
             _append_structured_overview(
                 story,
                 data,
@@ -1504,32 +1637,6 @@ def build_insight_export_pdf(
                 subsection_style=subsection_style,
                 body_style=body_style,
             )
-            _append_comprehensive_map_report(
-                story,
-                data,
-                section_style=section_style,
-                subsection_style=subsection_style,
-                body_style=body_style,
-                meta_style=meta_style,
-            )
-        else:
-            ai_narrative = (narrative or "").strip()
-            if ai_narrative and _narrative_looks_valid(ai_narrative, data):
-                _append_markdown_narrative(
-                    story,
-                    ai_narrative,
-                    section_style=section_style,
-                    subsection_style=subsection_style,
-                    body_style=body_style,
-                )
-            else:
-                _append_structured_overview(
-                    story,
-                    data,
-                    section_style=section_style,
-                    subsection_style=subsection_style,
-                    body_style=body_style,
-                )
 
     if "analytics" in sections:
         story.append(_wrap_text("Coverage analytics", section_style))
